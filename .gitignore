@@ -4,3 +4,4 @@ VS/
 .venv/
 .env
 __pycache__/
+test/data/**

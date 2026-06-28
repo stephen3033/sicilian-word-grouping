@@ -26,7 +26,7 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1", validation_alias="OPENAI_BASE_URL"
     )
     model: str = Field(
-        default="anthropic/claude-sonnet-4.5", validation_alias="MODEL"
+        default="anthropic/claude-sonnet-4.6", validation_alias="MODEL"
     )
 
     # --- non-secret runtime config (defaults in code; override via VS_* env) ---
@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     image_dpi: int = 200
     column_layout: Literal["vertical", "horizontal"] = "vertical"
     strip_ocr_prefix: bool = True
+    output_dir: Path = Path("test/data/transform/output")
 
     def pdf_path(self) -> Path:
         return self.data_dir / "columns" / f"VS{self.volume}-1col.pdf"

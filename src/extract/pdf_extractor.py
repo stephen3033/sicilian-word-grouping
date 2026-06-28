@@ -6,14 +6,14 @@ import io
 import pymupdf
 from PIL import Image
 
-from src.config import Settings, get_settings
+from src.config import get_settings
 
 
-def extract_page_image(page_number: int, settings: Settings | None = None) -> str:
+def extract_page_image(page_number: int) -> str:
     """Render printed page `page_number` of the active volume to a raw base64
     PNG string (the caller supplies the `image/png` media type)."""
 
-    s = settings or get_settings()
+    s = get_settings()
     pdf_path = s.pdf_path()
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
