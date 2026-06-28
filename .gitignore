@@ -3,3 +3,4 @@
 VS/
 .venv/
 .env
+__pycache__/

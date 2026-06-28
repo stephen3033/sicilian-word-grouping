@@ -13,6 +13,15 @@ The system is split into four isolated, data-driven layers:
 
 ---
 
+## Extraction Layer
+
+The two extractors share a common addressing scheme: the integer argument is the **printed page number** of the active volume (selected by `VS_VOLUME`). The Vocabolario Siciliano single-column PDFs split each printed page into two physical PDF pages (left column, then right column), so one printed page = two PDF pages. `extract_page_image` renders both and composites them into a single image; `extract_page_text` returns the matching block from the OCR txt (one line per OCR'd line, prefixed `<n> <text>`).
+
+- **Image composition** (`VS_COLUMN_LAYOUT`): `vertical` (default) stacks the left column above the right, so a VLM's natural top-down scan matches the dictionary's reading order (left col top→bottom, then right col top→bottom). `horizontal` restores the original side-by-side page orientation for A/B testing.
+- **Secrets**: `.env` holds only `OPENAI_API_KEY=op://...` and is resolved by 1Password — launch with `op run --env-file=.env -- uv run sicilian-word-grouping`. `Settings` (`src/config.py`) never reads `.env`; it reads the resolved values from the process environment. All other config (`VS_VOLUME`, `VS_DPI`, `VS_COLUMN_LAYOUT`, `VS_DATA_DIR`, `VS_STRIP_OCR_PREFIX`, `OPENAI_BASE_URL`, `MODEL`) has Python defaults and is overridable via env.
+
+---
+
 ## Directory Structure
 
 The project follows a modern `src/` layout pattern to separate execution modules from project configurations.
@@ -20,21 +29,17 @@ The project follows a modern `src/` layout pattern to separate execution modules
 ```text
 .
 ├── pyproject.toml         # Project metadata and dependencies managed by uv
-├── run.py                 # Main CLI application entry point
-├── .env.template          # Environment variables to configure
-├── .gitignore             # Ignore useless files and the VS (This should NEVER be published)
-├── data/
-│   ├── input/             # Source multi-page documents
-│   └── output/            # Extracted records and runtime quality metrics
+├── .env.template          # Secrets template (OPENAI_API_KEY as op:// reference)
+├── .gitignore             # Ignores .env, .venv, VS/ (source data, never published)
 └── src/
     ├── __init__.py
-    ├── main.py            # Pipeline orchestrator (Sequences E -> T -> V -> L)
-    ├── config.py          # Application configuration and environment guard
+    ├── main.py            # Pipeline orchestrator entry point (E -> T -> V -> L)
+    ├── config.py          # Typed Settings (pydantic-settings) read from process env
     │
     ├── extract/           # [Active] Layer 1: File ingestion & text extraction
     │   ├── __init__.py
-    │   ├── pdf_processor.py
-    │   └── text_engine.py
+    │   ├── pdf_extractor.py    # printed page -> composited base64 PNG
+    │   └── ocr_extractor.py    # printed page -> prefix-stripped OCR text block
     │
     ├── transform/         # [Active] Layer 2: Prompt compilation & LLM interface
     │   ├── __init__.py
