@@ -28,11 +28,23 @@ SYSTEM_PROMPT = textwrap.dedent("""\
     3. NO WRAPPERS: Output your extraction directly as a raw JSON string. Do not include markdown code block formatting (```json) or conversational text.
 """)
 
-import json
-import textwrap
-
 _USER_PREAMBLES: dict[str, str] = {
     "anthropic/claude-sonnet-4.6": textwrap.dedent("""\
+        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
+
+        ### TYPOGRAPHIC MAPPING RULES:
+        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
+        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
+        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
+        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
+        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
+
+        ### OCR CORRECTION:
+        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
+
+        ### INJECTION CONTEXT:
+    """),
+    "google/gemini-3.1-pro-preview": textwrap.dedent("""\
         Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
 
         ### TYPOGRAPHIC MAPPING RULES:

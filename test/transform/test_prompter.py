@@ -53,3 +53,15 @@ class TestBuildUserPrompt:
         assert out.index(
             _USER_PREAMBLES["anthropic/claude-sonnet-4.6"]
         ) < out.index("json_schema:")
+
+    def test_gemini_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "google/gemini-3.1-pro-preview")
+        assert _USER_PREAMBLES["google/gemini-3.1-pro-preview"] in build_user_prompt(
+            "text"
+        )
+
+    def test_gemini_preamble_equals_claude_preamble_as_starting_point(self):
+        assert (
+            _USER_PREAMBLES["google/gemini-3.1-pro-preview"]
+            == _USER_PREAMBLES["anthropic/claude-sonnet-4.6"]
+        )

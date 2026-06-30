@@ -22,6 +22,17 @@ The two extractors share a common addressing scheme: the integer argument is the
 
 ---
 
+## Transform Layer
+
+The transform layer maps each page's composited image and OCR text into a structured `DictionaryEntry` payload via a single multimodal OpenRouter vision call (one image + one compiled prompt per page).
+
+- **Prompt compilation** (`src/transform/prompter.py`): `build_user_prompt` selects a model-specific preamble from `_USER_PREAMBLES` keyed by the active `MODEL`, then concatenates it with the `DictionaryEntry` JSON schema and the OCR page text via `_USER_TEMPLATE`. The model-agnostic `SYSTEM_PROMPT` frames the call as a non-conversational extraction engine.
+- **Vision client** (`src/transform/client.py`): `extract_json` sends the system prompt, the Base64 page image, and the compiled user prompt to the OpenAI-compatible chat endpoint. `response_format={"type": "json_object"}` is a hard rail forcing raw JSON output (no markdown wrappers).
+- **Supported models** (selectable via the `MODEL` env var): `anthropic/claude-sonnet-4.6` (default) and `google/gemini-3.1-pro-preview`. Each has its own preamble string in `_USER_PREAMBLES` so they can be refined independently; the Gemini preamble currently mirrors the Claude preamble as a shared starting point. Note: `gemini-3.1-pro-preview` is an OpenRouter preview slug and may be renamed or retired upstream.
+- **Persistence**: `src/main.py` orchestrates a configurable `--start`/`--end` printed-page range, running E -> T per page and writing each page's raw model output to `test/data/transform/output/` for visual inspection.
+
+---
+
 ## Testing
 
 Run the unit suite (no network or API key required; the OpenAI client is faked):
