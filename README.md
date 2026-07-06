@@ -46,14 +46,23 @@ uv run pytest
 ## Cost Projection
 
 Gemini Pro 3.1 - $0.127/page
+
 Gemini Flash 3.5 - $0.0271/page
+
 Claude Fable 5 - $0.2845/page
+
 Claude Sonnet 5 - $0.0675/page
+
 Claude Sonnet 4.6 - $0.04755/page
+
 GPT 5.5 - $0.199/page (extracts 1 line json)
+
 GPT 5.4 - $0.0351/page (extracts 1 line json)
+
 GPT 5.4 Mini - $0.009/page (extracts 1 line json, did not follow instructions and conform to schema, not a usable json output)
+
 Kimi K2.6 - $0.062/page (failed at extracting the first page due to rate limits, extracts 1 line json)
+
 Kimi K2.7 Code - $0.04965/page (did not get v. variants, extracts 1 line json, removed POS from trailing text)
 
 **NOTE:** The ideal cost to performance seems to be between $0.01-$0.05, Gemini 3.5 Flash, Claude Sonnet 4.6, GPT 5.4, and Kimi K2.7 Code
