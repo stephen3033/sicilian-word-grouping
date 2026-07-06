@@ -60,8 +60,30 @@ class TestBuildUserPrompt:
             "text"
         )
 
-    def test_gemini_preamble_equals_claude_preamble_as_starting_point(self):
-        assert (
-            _USER_PREAMBLES["google/gemini-3.1-pro-preview"]
-            == _USER_PREAMBLES["anthropic/claude-sonnet-4.6"]
-        )
+    def test_gemini_flash_35_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "google/gemini-3.5-flash")
+        assert _USER_PREAMBLES["google/gemini-3.5-flash"] in build_user_prompt("text")
+
+    def test_gpt_55_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "openai/gpt-5.5")
+        assert _USER_PREAMBLES["openai/gpt-5.5"] in build_user_prompt("text")
+
+    def test_gpt_54_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "openai/gpt-5.4")
+        assert _USER_PREAMBLES["openai/gpt-5.4"] in build_user_prompt("text")
+
+    def test_gpt_54_mini_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "openai/gpt-5.4-mini")
+        assert _USER_PREAMBLES["openai/gpt-5.4-mini"] in build_user_prompt("text")
+
+    def test_claude_fable_5_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "anthropic/claude-fable-5")
+        assert _USER_PREAMBLES["anthropic/claude-fable-5"] in build_user_prompt("text")
+
+    def test_kimi_k26_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "moonshotai/kimi-k2.6")
+        assert _USER_PREAMBLES["moonshotai/kimi-k2.6"] in build_user_prompt("text")
+
+    def test_kimi_k27_code_preamble_present(self, monkeypatch):
+        _patch_model(monkeypatch, "moonshotai/kimi-k2.7-code")
+        assert _USER_PREAMBLES["moonshotai/kimi-k2.7-code"] in build_user_prompt("text")

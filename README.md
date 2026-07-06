@@ -28,7 +28,7 @@ The transform layer maps each page's composited image and OCR text into a struct
 
 - **Prompt compilation** (`src/transform/prompter.py`): `build_user_prompt` selects a model-specific preamble from `_USER_PREAMBLES` keyed by the active `MODEL`, then concatenates it with the `DictionaryEntry` JSON schema and the OCR page text via `_USER_TEMPLATE`. The model-agnostic `SYSTEM_PROMPT` frames the call as a non-conversational extraction engine.
 - **Vision client** (`src/transform/client.py`): `extract_json` sends the system prompt, the Base64 page image, and the compiled user prompt to the OpenAI-compatible chat endpoint. `response_format={"type": "json_object"}` is a hard rail forcing raw JSON output (no markdown wrappers).
-- **Supported models** (selectable via the `MODEL` env var): `anthropic/claude-sonnet-4.6` (default) and `google/gemini-3.1-pro-preview`. Each has its own preamble string in `_USER_PREAMBLES` so they can be refined independently; the Gemini preamble currently mirrors the Claude preamble as a shared starting point. Note: `gemini-3.1-pro-preview` is an OpenRouter preview slug and may be renamed or retired upstream.
+- **Supported models** (selectable via the `MODEL` env var): `anthropic/claude-fable-5`, `anthropic/claude-sonnet-5`, `anthropic/claude-sonnet-4.6` (default), `google/gemini-3.1-pro-preview`, `google/gemini-3.5-flash`, `openai/gpt-5.5`, `openai/gpt-5.4`, `openai/gpt-5.4-mini`, `moonshotai/kimi-k2.6`, and `moonshotai/kimi-k2.7-code`. Each has its own preamble string in `_USER_PREAMBLES` so they can be refined independently
 - **Persistence**: `src/main.py` orchestrates a configurable `--start`/`--end` printed-page range, running E -> T per page and writing each page's raw model output to `test/data/transform/output/` for visual inspection.
 
 ---
@@ -40,3 +40,20 @@ Run the unit suite (no network or API key required; the OpenAI client is faked):
 ```bash
 uv run pytest
 ```
+
+---
+
+## Cost Projection
+
+Gemini Pro 3.1 - $0.127/page
+Gemini Flash 3.5 - $0.0271/page
+Claude Fable 5 - $0.2845/page
+Claude Sonnet 5 - $0.0675/page
+Claude Sonnet 4.6 - $0.04755/page
+GPT 5.5 - $0.199/page (extracts 1 line json)
+GPT 5.4 - $0.0351/page (extracts 1 line json)
+GPT 5.4 Mini - $0.009/page (extracts 1 line json, did not follow instructions and conform to schema, not a usable json output)
+Kimi K2.6 - $0.062/page (failed at extracting the first page due to rate limits, extracts 1 line json)
+Kimi K2.7 Code - $0.04965/page (did not get v. variants, extracts 1 line json, removed POS from trailing text)
+
+**NOTE:** The ideal cost to performance seems to be between $0.01-$0.05, Gemini 3.5 Flash, Claude Sonnet 4.6, GPT 5.4, and Kimi K2.7 Code
