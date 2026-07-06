@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from src.config import Settings
 from src.models import DictionaryEntry
-from src.transform.prompter import _USER_PREAMBLES, build_user_prompt
+from src.transform.prompter import _DEFAULT_PREAMBLE, _USER_PREAMBLES, build_user_prompt
 
 
 def _patch_model(monkeypatch, model: str) -> None:
@@ -36,10 +34,10 @@ class TestBuildUserPrompt:
         out = build_user_prompt("some ocr text")
         assert out.index("json_schema:") < out.index("ocr_page_text:")
 
-    def test_unknown_model_raises_keyerror(self, monkeypatch):
+    def test_unknown_model_falls_back_to_default(self, monkeypatch):
         _patch_model(monkeypatch, "some/unknown-model")
-        with pytest.raises(KeyError):
-            build_user_prompt("text")
+        out = build_user_prompt("text")
+        assert _DEFAULT_PREAMBLE in out
 
     def test_known_model_preamble_present(self, monkeypatch):
         _patch_model(monkeypatch, "anthropic/claude-sonnet-4.6")
@@ -54,35 +52,13 @@ class TestBuildUserPrompt:
             _USER_PREAMBLES["anthropic/claude-sonnet-4.6"]
         ) < out.index("json_schema:")
 
-    def test_gemini_preamble_present(self, monkeypatch):
-        _patch_model(monkeypatch, "google/gemini-3.1-pro-preview")
-        assert _USER_PREAMBLES["google/gemini-3.1-pro-preview"] in build_user_prompt(
-            "text"
-        )
-
     def test_gemini_flash_35_preamble_present(self, monkeypatch):
         _patch_model(monkeypatch, "google/gemini-3.5-flash")
         assert _USER_PREAMBLES["google/gemini-3.5-flash"] in build_user_prompt("text")
 
-    def test_gpt_55_preamble_present(self, monkeypatch):
-        _patch_model(monkeypatch, "openai/gpt-5.5")
-        assert _USER_PREAMBLES["openai/gpt-5.5"] in build_user_prompt("text")
-
     def test_gpt_54_preamble_present(self, monkeypatch):
         _patch_model(monkeypatch, "openai/gpt-5.4")
         assert _USER_PREAMBLES["openai/gpt-5.4"] in build_user_prompt("text")
-
-    def test_gpt_54_mini_preamble_present(self, monkeypatch):
-        _patch_model(monkeypatch, "openai/gpt-5.4-mini")
-        assert _USER_PREAMBLES["openai/gpt-5.4-mini"] in build_user_prompt("text")
-
-    def test_claude_fable_5_preamble_present(self, monkeypatch):
-        _patch_model(monkeypatch, "anthropic/claude-fable-5")
-        assert _USER_PREAMBLES["anthropic/claude-fable-5"] in build_user_prompt("text")
-
-    def test_kimi_k26_preamble_present(self, monkeypatch):
-        _patch_model(monkeypatch, "moonshotai/kimi-k2.6")
-        assert _USER_PREAMBLES["moonshotai/kimi-k2.6"] in build_user_prompt("text")
 
     def test_kimi_k27_code_preamble_present(self, monkeypatch):
         _patch_model(monkeypatch, "moonshotai/kimi-k2.7-code")

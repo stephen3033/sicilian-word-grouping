@@ -28,157 +28,27 @@ SYSTEM_PROMPT = textwrap.dedent("""\
     3. NO WRAPPERS: Output your extraction directly as a raw JSON string. Do not include markdown code block formatting (```json) or conversational text.
 """)
 
+_DEFAULT_PREAMBLE = textwrap.dedent("""\
+    Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
+
+    ### TYPOGRAPHIC MAPPING RULES:
+    - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
+    - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
+    - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
+    - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
+    - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
+
+    ### OCR CORRECTION:
+    - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
+
+    ### INJECTION CONTEXT:
+""")
+
 _USER_PREAMBLES: dict[str, str] = {
-    "anthropic/claude-sonnet-4.6": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "google/gemini-3.1-pro-preview": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "anthropic/claude-sonnet-5": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "google/gemini-3.5-flash": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "openai/gpt-5.5": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-        "openai/gpt-5.4": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "openai/gpt-5.4-mini": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "anthropic/claude-fable-5": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "moonshotai/kimi-k2.6": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
-    "moonshotai/kimi-k2.7-code": textwrap.dedent("""\
-        Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
-
-        ### TYPOGRAPHIC MAPPING RULES:
-        - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-        - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
-        - trailing_text (str|null): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
-        - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
-        - page_numbers (list[int]): The printed page number appears at the end of the OCR text block after the literal token `PAGE`; populate `page_numbers` from it. Use the image only to resolve multi-page-span ambiguity.
-
-        ### OCR CORRECTION:
-        - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.
-
-        ### INJECTION CONTEXT:
-    """),
+    "anthropic/claude-sonnet-4.6": _DEFAULT_PREAMBLE,
+    "google/gemini-3.5-flash": _DEFAULT_PREAMBLE,
+    "openai/gpt-5.4": _DEFAULT_PREAMBLE,
+    "moonshotai/kimi-k2.7-code": _DEFAULT_PREAMBLE,
 }
 
 _USER_TEMPLATE = textwrap.dedent("""\
@@ -191,11 +61,31 @@ _USER_TEMPLATE = textwrap.dedent("""\
     {page_text}""")
 
 
+def _preamble_for(model: str) -> str:
+    """Return the user-prompt preamble for a model id.
+
+    Each registered model has its own case so a bespoke preamble can be
+    slotted in later. Unregistered models fall through to the default
+    preamble.
+    """
+    match model:
+        case "anthropic/claude-sonnet-4.6":
+            return _USER_PREAMBLES["anthropic/claude-sonnet-4.6"]
+        case "google/gemini-3.5-flash":
+            return _USER_PREAMBLES["google/gemini-3.5-flash"]
+        case "openai/gpt-5.4":
+            return _USER_PREAMBLES["openai/gpt-5.4"]
+        case "moonshotai/kimi-k2.7-code":
+            return _USER_PREAMBLES["moonshotai/kimi-k2.7-code"]
+        case _:  # unregistered models fall back to the default preamble
+            return _DEFAULT_PREAMBLE
+
+
 def build_user_prompt(page_text: str) -> str:
     """Compile the model-specific preamble + DictionaryEntry schema + OCR text."""
     s = get_settings()
     return _USER_TEMPLATE.format(
-        preamble=_USER_PREAMBLES[s.model],
+        preamble=_preamble_for(s.model),
         schema_json=json.dumps(DictionaryEntry.model_json_schema(), indent=2),
         page_text=page_text,
     )

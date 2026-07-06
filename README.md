@@ -26,9 +26,9 @@ The two extractors share a common addressing scheme: the integer argument is the
 
 The transform layer maps each page's composited image and OCR text into a structured `DictionaryEntry` payload via a single multimodal OpenRouter vision call (one image + one compiled prompt per page).
 
-- **Prompt compilation** (`src/transform/prompter.py`): `build_user_prompt` selects a model-specific preamble from `_USER_PREAMBLES` keyed by the active `MODEL`, then concatenates it with the `DictionaryEntry` JSON schema and the OCR page text via `_USER_TEMPLATE`. The model-agnostic `SYSTEM_PROMPT` frames the call as a non-conversational extraction engine.
+- **Prompt compilation** (`src/transform/prompter.py`): `build_user_prompt` selects a model-specific preamble from `_USER_PREAMBLES` keyed by the active `MODEL`, falling back to the Claude Sonnet 4.6 preamble for unregistered models, then concatenates it with the `DictionaryEntry` JSON schema and the OCR page text via `_USER_TEMPLATE`. The model-agnostic `SYSTEM_PROMPT` frames the call as a non-conversational extraction engine.
 - **Vision client** (`src/transform/client.py`): `extract_json` sends the system prompt, the Base64 page image, and the compiled user prompt to the OpenAI-compatible chat endpoint. `response_format={"type": "json_object"}` is a hard rail forcing raw JSON output (no markdown wrappers).
-- **Supported models** (selectable via the `MODEL` env var): `anthropic/claude-fable-5`, `anthropic/claude-sonnet-5`, `anthropic/claude-sonnet-4.6` (default), `google/gemini-3.1-pro-preview`, `google/gemini-3.5-flash`, `openai/gpt-5.5`, `openai/gpt-5.4`, `openai/gpt-5.4-mini`, `moonshotai/kimi-k2.6`, and `moonshotai/kimi-k2.7-code`. Each has its own preamble string in `_USER_PREAMBLES` so they can be refined independently
+- **Registered models** (selectable via the `MODEL` env var): `anthropic/claude-sonnet-4.6` (default), `google/gemini-3.5-flash`, `openai/gpt-5.4`, and `moonshotai/kimi-k2.7-code`. Any other model id resolves to the default preamble, so new models can be tried without first registering them.
 - **Persistence**: `src/main.py` orchestrates a configurable `--start`/`--end` printed-page range, running E -> T per page and writing each page's raw model output to `test/data/transform/output/` for visual inspection.
 
 ---
