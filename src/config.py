@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     column_layout: Literal["vertical", "horizontal"] = "vertical"
     strip_ocr_prefix: bool = True
     output_dir: Path = Path("test/data/transform/output")
+    log_file: Path = Path("logs/pipeline.log")
 
     def pdf_path(self) -> Path:
         return self.data_dir / "columns" / f"VS{self.volume}-1col.pdf"

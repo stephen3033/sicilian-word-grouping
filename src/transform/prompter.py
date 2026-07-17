@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import textwrap
 
 from src.config import get_settings
+from src.common.logger import log_errors
 from src.models import DictionaryEntry
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = textwrap.dedent("""\
     You are a high-precision, non-conversational data extraction engine for structured lexicographical parsing. 
@@ -81,11 +85,22 @@ def _preamble_for(model: str) -> str:
             return _DEFAULT_PREAMBLE
 
 
+@log_errors
 def build_user_prompt(page_text: str) -> str:
     """Compile the model-specific preamble + DictionaryEntry schema + OCR text."""
     s = get_settings()
-    return _USER_TEMPLATE.format(
-        preamble=_preamble_for(s.model),
+    preamble = _preamble_for(s.model)
+    logger.debug(
+        "build_user_prompt: model=%s preamble=%d chars", s.model, len(preamble)
+    )
+    prompt = _USER_TEMPLATE.format(
+        preamble=preamble,
         schema_json=json.dumps(DictionaryEntry.model_json_schema(), indent=2),
         page_text=page_text,
     )
+    logger.debug(
+        "build_user_prompt: prompt=%d chars ocr=%d chars",
+        len(prompt),
+        len(page_text),
+    )
+    return prompt

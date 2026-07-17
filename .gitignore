@@ -7,3 +7,5 @@ __pycache__/
 test/data/**
 
 AGENTS.md
+
+logs/

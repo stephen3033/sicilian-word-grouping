@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 
 import pymupdf
 from PIL import Image
 
 from src.config import get_settings
+from src.common.logger import log_errors
+
+logger = logging.getLogger(__name__)
 
 
+@log_errors
 def extract_page_image(page_number: int) -> str:
     """Render printed page `page_number` of the active volume to a raw base64
     PNG string (the caller supplies the `image/png` media type)."""
@@ -17,6 +22,7 @@ def extract_page_image(page_number: int) -> str:
     pdf_path = s.pdf_path()
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    logger.debug("extract_page_image: opening %s", pdf_path)
 
     with pymupdf.open(pdf_path) as doc:
         printed_page_count = doc.page_count // 2
@@ -25,13 +31,35 @@ def extract_page_image(page_number: int) -> str:
                 f"page_number {page_number} out of range [1, {printed_page_count}]"
                 f" for {pdf_path.name}"
             )
+        logger.debug(
+            "extract_page_image: page %d of %d, dpi=%d",
+            page_number,
+            printed_page_count,
+            s.image_dpi,
+        )
         left_img = _render_page(doc, 2 * page_number - 2, s.image_dpi)
         right_img = _render_page(doc, 2 * page_number - 1, s.image_dpi)
 
+    logger.debug(
+        "extract_page_image: left=%dx%d right=%dx%d layout=%s",
+        left_img.width,
+        left_img.height,
+        right_img.width,
+        right_img.height,
+        s.column_layout,
+    )
     composite = _composite(left_img, right_img, s.column_layout)
     buf = io.BytesIO()
     composite.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    logger.debug(
+        "extract_page_image: composite=%dx%d png=%d bytes b64=%d chars",
+        composite.width,
+        composite.height,
+        len(buf.getvalue()),
+        len(b64),
+    )
+    return b64
 
 
 def _render_page(doc: pymupdf.Document, page_index: int, dpi: int) -> Image.Image:
