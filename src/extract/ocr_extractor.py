@@ -42,4 +42,4 @@ def extract_page_text(page_number: int) -> str:
         body = "\n".join(lines)
     else:
         body = "\n".join(line.partition(" ")[2] for line in lines)
-    return f"{body}\nPAGE {page_number}"
+    return body

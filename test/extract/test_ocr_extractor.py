@@ -90,7 +90,7 @@ class TestExtractPageText:
         _write_ocr_txt(txt, ["1 hello world", "1 second line"])
         _patch_settings(monkeypatch, tmp_path)
         out = extract_page_text(1)
-        assert out == "hello world\nsecond line\nPAGE 1"
+        assert out == "hello world\nsecond line"
         assert not any(line.startswith("1 ") for line in out.splitlines())
 
     def test_keeps_prefix_when_setting_off(self, tmp_path: Path, monkeypatch):
@@ -98,7 +98,7 @@ class TestExtractPageText:
         _write_ocr_txt(txt, ["1 hello world"])
         _patch_settings(monkeypatch, tmp_path, strip_ocr_prefix=False)
         out = extract_page_text(1)
-        assert out == "1 hello world\nPAGE 1"
+        assert out == "1 hello world"
 
     def test_missing_page_raises(self, tmp_path: Path, monkeypatch):
         txt = tmp_path / "OCR_cols" / "VS1-1col-googlevision.txt"
@@ -120,7 +120,7 @@ class TestExtractPageText:
         )
         _patch_settings(monkeypatch, tmp_path)
         out = extract_page_text(1)
-        assert out == "alpha\nbeta\ngamma\ndelta\nPAGE 1"
+        assert out == "alpha\nbeta\ngamma\ndelta"
 
 
 # ---------------------------------------------------------------------------
