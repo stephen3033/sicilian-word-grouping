@@ -1,14 +1,22 @@
 """Validation layer of the ETVL pipeline.
 
 The validate step is a runtime quality gate. It takes the raw JSON string
-emitted by the transform layer, parses it, and runs two ordered checks:
+emitted by the transform layer, parses it, and runs two ordered phases:
 
-1. Schema conformance - each entry is validated against the
-   `DictionaryEntry` pydantic model. A failure here kills the attempt
-   immediately (no attribute checks run).
-2. Attribute grounding - for each schema-valid entry, the `headword` (when
-   present) and every element of `variants` (when present) must appear as
-   an exact substring of the page's OCR text. A failure kills the attempt.
+1. Parse & unwrap - the raw JSON is parsed and the top-level ``entries``
+   list is extracted. A failure here kills the attempt immediately.
+2. Schema conformance + grounding - each entry is validated against the
+   `DictionaryEntry` pydantic model via `model_validate`, with the page's
+   OCR text (pre-normalized once via `normalization()`) and the entry
+   index threaded through the validation context. Pydantic runs the
+   model's `@model_validator(mode="after")` checks in definition order
+   - `headword`, then `variants`, then `trailing_text` - each grounding
+   its field against the normalized OCR text. A failure in any check
+   kills the attempt.
+
+`mode="after"` validators only run once all field-level validation
+(types, required fields) has passed, so schema conformance strictly
+precedes grounding - enforced by Pydantic, not by code ordering.
 
 Failures are logged to the configured logfile and raise `ValidationError`.
 """
@@ -20,14 +28,12 @@ import logging
 
 from pydantic import ValidationError as PydanticValidationError
 
+from src.common.errors import ValidationError
 from src.common.logger import log_errors
+from src.common.normalize import normalization
 from src.models import DictionaryEntry
 
 logger = logging.getLogger(__name__)
-
-
-class ValidationError(Exception):
-    """Raised when a transformed payload fails validation."""
 
 
 @log_errors
@@ -38,7 +44,7 @@ def validate(raw_json: str, ocr_text: str) -> list[DictionaryEntry]:
         raw_json: Raw JSON string returned by the transform layer, shaped
             as `{"entries": [ {DictionaryEntry}, ... ]}`.
         ocr_text: The page's OCR text (prefix-stripped) used as the ground
-            truth for headword / variant substring checks.
+            truth for headword / variant / trailing_text substring checks.
 
     Returns:
         The list of schema-valid, ground-truth-checked `DictionaryEntry`
@@ -71,12 +77,25 @@ def validate(raw_json: str, ocr_text: str) -> list[DictionaryEntry]:
         raise ValidationError("'entries' is not a list")
     logger.debug("validate: unwrapped %d entries", len(raw_entries))
 
-    # --- 3. Schema conformance (first check) ---------------------------
+    # --- 3. Schema conformance + grounding -----------------------------
+    # The page's OCR text is normalized once here; every per-entry
+    # `@model_validator(mode="after")` grounding check receives it via the
+    # validation context and normalizes only the field side before the
+    # verbatim substring (`in`) check. Pydantic runs the model validators
+    # in definition order - headword, variants, trailing_text - and only
+    # after all field-level validation has passed, so schema conformance
+    # strictly precedes grounding.
+    normalized_ocr = normalization(ocr_text)
     entries: list[DictionaryEntry] = []
     for i, raw_entry in enumerate(raw_entries):
         try:
-            entries.append(DictionaryEntry.model_validate(raw_entry))
-            logger.debug("validate: entry %d schema ok", i)
+            entries.append(
+                DictionaryEntry.model_validate(
+                    raw_entry,
+                    context={"normalized_ocr": normalized_ocr, "index": i},
+                )
+            )
+            logger.debug("validate: entry %d schema + grounding ok", i)
         except PydanticValidationError as e:
             logger.error(
                 "validate: entry %d failed schema conformance: %s", i, e
@@ -84,30 +103,6 @@ def validate(raw_json: str, ocr_text: str) -> list[DictionaryEntry]:
             raise ValidationError(
                 f"entry {i} failed schema conformance: {e}"
             ) from e
-
-    # --- 4. Attribute grounding (second check) -------------------------
-    for i, entry in enumerate(entries):
-        if entry.headword is not None and entry.headword not in ocr_text:
-            logger.error(
-                "validate: entry %d headword %r not found in OCR text",
-                i,
-                entry.headword,
-            )
-            raise ValidationError(
-                f"entry {i} headword {entry.headword!r} not found in OCR text"
-            )
-        if entry.variants:
-            for v in entry.variants:
-                if v not in ocr_text:
-                    logger.error(
-                        "validate: entry %d variant %r not found in OCR text",
-                        i,
-                        v,
-                    )
-                    raise ValidationError(
-                        f"entry {i} variant {v!r} not found in OCR text"
-                    )
-        logger.debug("validate: entry %d grounding ok", i)
 
     logger.info("validate: %d entries passed", len(entries))
     return entries

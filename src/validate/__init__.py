@@ -1,3 +1,3 @@
-from src.validate.validate import ValidationError, validate
+from src.validate.validate import validate
 
-__all__ = ["ValidationError", "validate"]
+__all__ = ["validate"]
