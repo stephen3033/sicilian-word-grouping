@@ -28,17 +28,16 @@ def _build_index(ocr_path: str, _mtime: float) -> dict[int, list[str]]:
 def extract_page_text(page_number: int) -> str:
     """Return the OCR text block for printed page `page_number`.
 
-    Lines in the txt are prefixed `<n> <text>`. By default the prefix is
-    stripped (see `Settings.strip_ocr_prefix`). Returns "" if the page has no
-    lines.
+    Lines in the txt are prefixed `<n> <text>`; the prefix is stripped when
+    `Settings.strip_ocr_prefix` is True. Raises `KeyError` if the page has
+    no lines.
     """
-
     s = get_settings()
     ocr_path = s.ocr_txt_path()
     if not ocr_path.exists():
         raise FileNotFoundError(f"OCR txt not found: {ocr_path}")
 
-    # mtime in the key invalidates the cache when the volume or file changes.
+    # mtime in the key invalidates the cache when the file changes.
     index = _build_index(str(ocr_path), ocr_path.stat().st_mtime)
     lines = index.get(page_number, [])
     if not lines:

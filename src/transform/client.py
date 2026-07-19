@@ -28,7 +28,7 @@ def extract_json(base64_image: str, system_prompt: str, user_prompt: str) -> str
     s = get_settings()
     response = _get_client().chat.completions.create(
         model=s.model,
-        response_format={"type": "json_object"},  # Hard rail: Forces raw JSON output
+        response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -36,16 +36,13 @@ def extract_json(base64_image: str, system_prompt: str, user_prompt: str) -> str
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
-                        },
+                        "image_url": {"url": f"data:image/png;base64,{base64_image}"},
                     },
                     {"type": "text", "text": user_prompt},
                 ],
             },
         ],
     )
-    # Fallback to empty string if content returns None
     content = response.choices[0].message.content or ""
     logger.debug(
         "model=%s image=%d chars prompt=%d chars response=%d chars",

@@ -29,8 +29,7 @@ def _patch_settings(monkeypatch, data_dir: Path, **overrides) -> None:
 
 
 def _make_tiny_pdf(path: Path, page_count: int = 4) -> None:
-    """Write a minimal PDF with `page_count` A4 pages, each holding a colored
-    rectangle so rendered output is non-blank."""
+    """Write a minimal PDF with `page_count` A4 pages, each holding a colored rectangle."""
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = pymupdf.open()
     for i in range(page_count):
@@ -49,11 +48,6 @@ def tiny_pdf(tmp_path: Path) -> Path:
     pdf = tmp_path / "columns" / "VS1-1col.pdf"
     _make_tiny_pdf(pdf, page_count=4)
     return pdf
-
-
-# ---------------------------------------------------------------------------
-# Unit tests — synthetic tiny PDF or pure PIL, no VS data required.
-# ---------------------------------------------------------------------------
 
 
 class TestComposite:
@@ -78,7 +72,7 @@ class TestComposite:
         right = Image.new("RGB", (5, 30), "blue")
         out = _composite(left, right, "vertical")
         assert out.size == (10, 50)
-        # right column is narrower; the extra pixels on its row stay white
+        # right column narrower; extra pixels on its row stay white
         assert out.getpixel((9, 20)) == (255, 255, 255)
         assert out.getpixel((4, 20)) == (0, 0, 255)
 
@@ -124,15 +118,9 @@ class TestExtractPageImage:
 
         vertical = Image.open(io.BytesIO(base64.b64decode(vertical_b64)))
         horizontal = Image.open(io.BytesIO(base64.b64decode(horizontal_b64)))
-        # same two columns composed; horizontal width ~ 2x vertical width
+        # horizontal width ~ 2x vertical width; vertical height ~ 2x horizontal
         assert horizontal.size[0] == pytest.approx(vertical.size[0] * 2, rel=0.05)
-        # heights: vertical is ~2x single column, horizontal ~1x single column
         assert vertical.size[1] == pytest.approx(horizontal.size[1] * 2, rel=0.05)
-
-
-# ---------------------------------------------------------------------------
-# Integration tests — require the real VS1 corpus; no expected image comparison.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not vs1_available, reason="VS1 data not available")

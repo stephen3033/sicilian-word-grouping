@@ -9,8 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Typed runtime config; secrets come from the process env (via `op run`),
-    non-secret defaults from `VS_*` env vars."""
+    """Typed runtime config; secrets from process env (via `op run`), defaults from `VS_*`."""
 
     model_config = SettingsConfigDict(
         env_file=None,
@@ -18,7 +17,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- secrets / connection config (injected by `op run` from .env) ---
     openai_api_key: SecretStr = Field(
         default=SecretStr(""), validation_alias="OPENAI_API_KEY"
     )
@@ -29,7 +27,6 @@ class Settings(BaseSettings):
         default="anthropic/claude-sonnet-4.6", validation_alias="MODEL"
     )
 
-    # --- non-secret runtime config (defaults in code; override via VS_* env) ---
     volume: int = 1
     data_dir: Path = Path("VS")
     image_dpi: int = 200
@@ -39,24 +36,11 @@ class Settings(BaseSettings):
     log_file: Path = Path("logs/pipeline.log")
     layout_tolerance: float = Field(
         15.0,
-        description=(
-            "Fudge factor (px) for the layout-verification heuristic - "
-            "subtracted from `headword_delta` to yield the effective |Δx| "
-            "threshold. Accounts for scan skew/tilt. Validated at 200 DPI "
-            "against VS1 (observed orphan max |Δx|=14; 1px safety margin). "
-            "Override via VS_LAYOUT_TOLERANCE."
-        ),
+        description="Fudge px subtracted from `headword_delta` for the layout heuristic; accounts for scan skew/tilt.",
     )
     headword_delta: float = Field(
         36.0,
-        description=(
-            "Calibrated min |Δx| (px) between the first two text lines on "
-            "a headword page, at 200 DPI. Combined with `layout_tolerance` "
-            "as the decision boundary: |Δx| > (headword_delta - tolerance) "
-            "=> headword present (is_orphan_fragment=False). Validated "
-            "against VS1 pp 1-973 (observed headword |Δx| 36-59). Override "
-            "via VS_HEADWORD_DELTA for other volumes."
-        ),
+        description="Calibrated min |Δx| px between the first two text lines on a headword page at 200 DPI.",
     )
 
     def pdf_path(self) -> Path:

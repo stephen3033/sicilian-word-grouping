@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 
 @log_errors
 def extract_page_image(page_number: int) -> str:
-    """Render printed page `page_number` of the active volume to a raw base64
-    PNG string (the caller supplies the `image/png` media type)."""
-
+    """Render printed page `page_number` to a base64 PNG string."""
     s = get_settings()
     pdf_path = s.pdf_path()
     if not pdf_path.exists():
@@ -69,8 +67,8 @@ def _composite(left: Image.Image, right: Image.Image, layout: str) -> Image.Imag
         canvas.paste(right, (left.width, 0))
         return canvas
 
-    # vertical (default): stack left column above right to preserve the
-    # dictionary's top-to-bottom reading order (left col, then right col).
+    # vertical (default): stack left above right to preserve top-to-bottom
+    # reading order (left col, then right col).
     canvas = Image.new("RGB", (max(left.width, right.width), left.height + right.height), "white")
     canvas.paste(left, (0, 0))
     canvas.paste(right, (0, left.height))

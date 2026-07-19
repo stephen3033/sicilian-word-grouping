@@ -13,24 +13,16 @@ logger = logging.getLogger(__name__)
 def _convert_image_to_layout_data(image_payload: bytes) -> dict:
     """Decode PNG bytes and extract text-line bboxes from the rendered page.
 
-    Returns: ``{"lines": [{"top", "bottom", "left_x", "width", "height"}, ...]}``
-    in pixel coordinates. Lines are groups of vertically-contiguous inked
-    rows (gap <= 4 white rows tolerated); bands shorter than 10px are
-    dropped as stray marks. The image is binarized at grayscale threshold
-    128 before row-ink detection.
-
-    The VS PDFs are rasterized scans with no text layer, so layout
-    extraction is purely pixel-based. The page image is the composite PNG
-    produced by ``src.extract.pdf_extractor.extract_page_image`` (two
-    columns stitched, rendered at ``Settings.image_dpi``).
+    Returns ``{"lines": [...], "page_width": w}`` in pixel coordinates. Lines
+    are groups of vertically-contiguous inked rows (gap <= 4 white rows
+    tolerated); bands < 10px are dropped. Binarized at grayscale threshold
+    128; every 4th column is sampled for row-ink detection.
     """
     img = Image.open(io.BytesIO(image_payload)).convert("L")
     bw = img.point(lambda p: 0 if p < 128 else 255)
     inv = ImageChops.invert(bw)
     width, height = bw.size
     px = bw.load()
-    # Sample every 4th column for speed; row-ink detection does not need
-    # full horizontal resolution.
     row_ink = [
         any(px[x, y] == 0 for x in range(0, width, 4)) for y in range(height)
     ]
@@ -76,24 +68,13 @@ def _convert_image_to_layout_data(image_payload: bytes) -> dict:
 def _analyze_first_span(
     layout_data: dict, delta: float, tolerance: float
 ) -> tuple[bool, bool]:
-    """Compare the first two real text lines and return ``(is_bold, is_indented)``.
+    """Compare the first two real text lines; return ``(is_bold, is_indented)``.
 
-    ``is_indented`` is ``True`` when the left X of the first two text lines
-    (each wider than 30px to drop marginalia/noise) differ by more than
-    ``delta - tolerance`` pixels. ``delta`` is the calibrated min |Δx|
-    observed on headword pages (200 DPI); ``tolerance`` is the fudge factor
-    subtracted from it to account for scan skew/tilt. This relative
-    comparison (rather than an absolute X coordinate) accommodates the
-    varying scan margins across VS volumes: a headword page has an
-    outdented headword token whose X differs from the body's X by
-    ~36-60px at 200 DPI, while an orphan-continuation page has all lines
-    aligned within ~5px.
-
-    ``is_bold`` is always ``True`` (no-op axis). Bold detection via ink
-    density was empirically unreliable at 200 DPI for the VS font (bold
-    density 0.15-0.26 overlaps body 0.12-0.18); the indent signal alone
-    correctly classifies all 32 validated pages. The axis is retained for
-    signature parity with the reference template's truth table.
+    Only lines wider than 30px (drops marginalia) are compared. `is_indented`
+    is True when their left X differs by more than `delta - tolerance` px.
+    `is_bold` is always True: bold detection via ink density was unreliable
+    at 200 DPI for the VS font; the indent axis alone classifies all
+    validated pages. Retained for truth-table signature parity.
     """
     lines = layout_data.get("lines", [])
     real = [ln for ln in lines if ln["width"] > 30]
@@ -107,10 +88,7 @@ def _analyze_first_span(
 def _require_normalized_ocr(info: ValidationInfo) -> str:
     """Return the pre-normalized OCR text from the validation context.
 
-    A grounding check with nothing to ground against is a pipeline setup
-    error, not a silent skip: raises `ValidationError` if the context is
-    missing, if `normalized_ocr` is absent, or if it is empty or
-    whitespace-only.
+    Raises `ValidationError` if missing, absent, or whitespace-only.
     """
     ctx = info.context or {}
     normalized_ocr = ctx.get("normalized_ocr")
@@ -123,12 +101,7 @@ def _require_normalized_ocr(info: ValidationInfo) -> str:
 
 
 def _entry_prefix(info: ValidationInfo) -> str:
-    """Build the `entry {i} ` prefix for grounding error messages.
-
-    The index is threaded in via the validation `context`; when absent
-    (e.g. a standalone `model_validate` call that did supply OCR), the
-    prefix is empty so the message just describes the failed field.
-    """
+    """Build the `entry {i} ` prefix for grounding error messages."""
     ctx = info.context or {}
     index = ctx.get("index")
     return f"entry {index} " if index is not None else ""
@@ -137,39 +110,22 @@ def _entry_prefix(info: ValidationInfo) -> str:
 class DictionaryEntry(BaseModel):
     headword: str | None = Field(
         None,
-        description=(
-            "The canonical lemma/headword of this dictionary entry. None when "
-            "a page begins mid-definition (continuation of the previous page's "
-            "final entry)."
-        ),
+        description="The canonical lemma/headword; None when a page begins mid-definition.",
     )
     trailing_text: str = Field(
         ...,
-        description=(
-            "Remaining body text of the entry that follows the headword line "
-            "- definitions, citations, sub-senses."
-        ),
+        description="Body text following the headword line: definitions, citations, sub-senses.",
     )
     variants: list[str] | None = Field(
         None,
-        description=(
-            "Alternate spellings / dialectal variants of the headword "
-            "explicitly listed in the entry."
-        ),
+        description="Alternate spellings / dialectal variants explicitly listed in the entry.",
     )
     page_numbers: list[int] = Field(
-        description=(
-            "Printed page number(s) this entry's text was drawn from. "
-            "Multi-element when a single headword spans consecutive pages."
-        ),
+        description="Printed page number(s) this entry's text was drawn from; multi-element if it spans pages.",
     )
     is_orphan_fragment: bool = Field(
         False,
-        description=(
-            "True when this text is a continuation of the previous page's "
-            "final headword (no new headword begins on this page). False when "
-            "the text starts a fresh entry."
-        ),
+        description="True when this text continues the previous page's final headword; False when a fresh entry starts.",
     )
 
     @field_validator("is_orphan_fragment")
@@ -177,32 +133,21 @@ class DictionaryEntry(BaseModel):
     def validate_layout_alignment(cls, v: bool, info: ValidationInfo) -> bool:
         """Verify ``is_orphan_fragment`` against the page's physical layout.
 
-        Only the first entry on a page can be a true orphan fragment, so the
-        check is gated on ``context["index"] == 0`` and the presence of an
-        ``image_payload`` (raw PNG bytes) in the validation context. When
-        either is missing, the validator no-ops (returns ``v`` unchanged) so
-        standalone ``model_validate`` calls without image bytes continue to
-        work.
+        Only the first entry on a page can be an orphan, so the check is
+        gated on ``context["index"] == 0`` and an ``image_payload`` (raw PNG
+        bytes) in the context; otherwise no-ops so standalone
+        ``model_validate`` calls without image bytes still work.
 
-        The heuristic compares the left X of the first two real text lines
-        on the rendered page image (pixel-based; the VS PDFs are rasterized
-        scans with no text layer):
+        Heuristic on the first two real text lines (pixel-based; VS PDFs are
+        rasterized scans with no text layer):
 
-        - ``|Δx| > (headword_delta - tolerance)`` -> lines at different X ->
-          a headword token is present -> expected ``is_orphan_fragment = False``.
+        - ``|Δx| > (headword_delta - tolerance)`` -> headword present ->
+          expected ``is_orphan_fragment = False``.
         - ``|Δx| ≤ (headword_delta - tolerance)`` -> lines aligned ->
-          continuation/orphan -> expected ``is_orphan_fragment = True``.
+          continuation -> expected ``is_orphan_fragment = True``.
 
-        ``headword_delta`` is the calibrated min |Δx| observed on headword
-        pages (200 DPI); ``tolerance`` is the fudge factor subtracted from
-        it to account for scan skew/tilt. Both are sourced from
-        ``Settings`` and threaded through the validation context.
-
-        If the AI-supplied value disagrees with the layout-derived
-        expectation, a ``ValueError`` is raised detailing the mismatch. The
-        bold axis from the reference template is dropped (ink density is
-        unreliable at 200 DPI for the VS font); see
-        ``_analyze_first_span`` for the empirical justification.
+        `headword_delta` and `tolerance` come from `Settings` via the
+        validation context. Disagreement raises `ValueError`.
         """
         ctx = info.context or {}
         if "image_payload" not in ctx:
@@ -217,12 +162,7 @@ class DictionaryEntry(BaseModel):
         try:
             layout_data = _convert_image_to_layout_data(payload)
             _, is_indented = _analyze_first_span(layout_data, delta, tolerance)
-
-            if is_indented:
-                expected_is_orphan = False
-            else:
-                expected_is_orphan = True
-
+            expected_is_orphan = not is_indented
             if v != expected_is_orphan:
                 raise ValueError(
                     f"AI extraction mismatch. Model flagged page start as "
@@ -240,12 +180,7 @@ class DictionaryEntry(BaseModel):
 
     @model_validator(mode="after")
     def _validate_headword(self, info: ValidationInfo) -> "DictionaryEntry":
-        """Ground `headword` against the normalized OCR text.
-
-        Raises `ValidationError` if the `normalized_ocr` context is
-        missing, empty, or whitespace-only. Skips silently when
-        `headword` is None (orphan fragment).
-        """
+        """Ground `headword` against the normalized OCR text; skip if None."""
         normalized_ocr = _require_normalized_ocr(info)
         if self.headword is None:
             return self
@@ -258,12 +193,7 @@ class DictionaryEntry(BaseModel):
 
     @model_validator(mode="after")
     def _validate_variants(self, info: ValidationInfo) -> "DictionaryEntry":
-        """Ground each element of `variants` against the normalized OCR text.
-
-        Raises `ValidationError` if the `normalized_ocr` context is
-        missing, empty, or whitespace-only. Skips silently when
-        `variants` is None or empty (falsy).
-        """
+        """Ground each element of `variants` against the normalized OCR text."""
         normalized_ocr = _require_normalized_ocr(info)
         if not self.variants:
             return self
@@ -278,20 +208,7 @@ class DictionaryEntry(BaseModel):
     def _validate_trailing_text(
         self, info: ValidationInfo
     ) -> "DictionaryEntry":
-        """Ground `trailing_text` against the normalized OCR text.
-
-        The page's OCR text (pre-normalized once by the validate stage)
-        and the entry's position in the payload are threaded in via the
-        validation `context`. `trailing_text` itself passes through
-        `normalization()` before the verbatim substring (`in`) check so
-        that layout whitespace and Unicode representation differences do
-        not defeat grounding.
-
-        Raises `ValidationError` if the `normalized_ocr` context is
-        missing, empty, or whitespace-only. `trailing_text` is required;
-        a missing or null value is rejected by field-level validation
-        before this `mode="after"` check runs.
-        """
+        """Ground `trailing_text` against the normalized OCR text."""
         normalized_ocr = _require_normalized_ocr(info)
         if normalization(self.trailing_text) not in normalized_ocr:
             raise ValidationError(

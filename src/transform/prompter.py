@@ -66,12 +66,7 @@ _USER_TEMPLATE = textwrap.dedent("""\
 
 
 def _preamble_for(model: str) -> str:
-    """Return the user-prompt preamble for a model id.
-
-    Each registered model has its own case so a bespoke preamble can be
-    slotted in later. Unregistered models fall through to the default
-    preamble.
-    """
+    """Return the user-prompt preamble for a model id; fall back to default."""
     match model:
         case "anthropic/claude-sonnet-4.6":
             return _USER_PREAMBLES["anthropic/claude-sonnet-4.6"]

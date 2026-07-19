@@ -32,23 +32,16 @@ def _validation_fail():
     raise ValidationError("bad payload")
 
 
-def _record_records(caplog):
-    """Return list of LogRecord captured by caplog at any level."""
-    return caplog.records
-
-
 class TestLogErrorsDecorator:
     def test_decorator_logs_and_reraises(self, caplog):
         with caplog.at_level(logging.ERROR):
             with pytest.raises(ValueError, match="kaboom"):
                 _boom()
 
-        records = _record_records(caplog)
-        error_records = [r for r in records if r.levelno == logging.ERROR]
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert len(error_records) == 1
         rec = error_records[0]
         assert "_boom failed" in rec.getMessage()
-        # Unexpected exceptions keep the full traceback.
         assert rec.exc_info is not None
         assert rec.exc_info[0] is ValueError
 
@@ -65,7 +58,6 @@ class TestLogErrorsDecorator:
                 _outer_calls_inner()
 
         error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
-        # Only the inner _boom logs; _outer_calls_inner skips re-logging.
         assert len(error_records) == 1
         assert "_boom failed" in error_records[0].getMessage()
         assert "_outer_calls_inner" not in error_records[0].getMessage()
@@ -82,9 +74,7 @@ class TestLogErrorsDecorator:
         error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert len(error_records) == 1
         rec = error_records[0]
-        # Single-line ERROR with the exception message inline.
         assert "_validation_fail failed: bad payload" in rec.getMessage()
-        # No traceback for ValidationError.
         assert rec.exc_info is None
 
     def test_validation_error_dedup_suppresses_outer_log(self, caplog):
@@ -135,6 +125,4 @@ class TestConfigureLogging:
         for h in logging.getLogger().handlers:
             h.flush()
         text = log_file.read_text(encoding="utf-8")
-        # The format embeds `%(funcName)s` between the logger name and the
-        # message, separated by dots.
         assert re.search(r"\] src\.test\.\w+: hello", text)
