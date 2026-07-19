@@ -1,4 +1,4 @@
-"""Unit tests for the layout helpers + `is_orphan_fragment` @field_validator.
+"""Unit tests for the layout helpers + headword-null `validate_layout_alignment` model_validator.
 
 Synthesizes small PNGs with PIL so the helpers and validator are exercised
 deterministically without the real corpus.
@@ -39,9 +39,9 @@ def _page_with_lines(line_specs: list[tuple[int, int, int, int]]) -> bytes:
     return _png_bytes(img)
 
 
-# Two lines at different X -> headword layout (|Δx|>threshold -> is_orphan=False).
+# Two lines at different X -> headword layout (|Δx|>threshold -> headword present expected).
 _HEADWORD_PNG = _page_with_lines([(100, 50, 600, 40), (160, 120, 600, 40)])
-# Two lines 5px apart in X -> orphan layout (|Δx|<=threshold -> is_orphan=True).
+# Two lines 5px apart in X -> orphan layout (|Δx|<=threshold -> headword=None expected).
 _ORPHAN_PNG = _page_with_lines([(100, 50, 600, 40), (105, 120, 600, 40)])
 
 
@@ -142,6 +142,7 @@ _ENTRY = {
     "trailing_text": "vocale",
     "variants": None,
     "page_numbers": [1],
+    "vs_vol": 0,
 }
 
 
@@ -161,52 +162,52 @@ def _ctx(
 
 
 class TestValidateLayoutAlignment:
-    def test_indented_layout_ai_false_passes(self):
-        entry = {**_ENTRY, "is_orphan_fragment": False}
+    def test_indented_layout_headword_present_passes(self):
+        entry = {**_ENTRY}
         out = DictionaryEntry.model_validate(entry, context=_ctx(_HEADWORD_PNG))
-        assert out.is_orphan_fragment is False
+        assert out.headword == "a¹"
 
-    def test_indented_layout_ai_true_raises_mismatch(self):
-        entry = {**_ENTRY, "is_orphan_fragment": True}
+    def test_indented_layout_headword_null_raises_mismatch(self):
+        entry = {**_ENTRY, "headword": None, "trailing_text": "vocale"}
         with pytest.raises(PydanticValidationError, match=r"AI extraction mismatch"):
             DictionaryEntry.model_validate(entry, context=_ctx(_HEADWORD_PNG))
 
-    def test_aligned_layout_ai_true_passes(self):
-        entry = {**_ENTRY, "is_orphan_fragment": True}
+    def test_aligned_layout_headword_null_passes(self):
+        entry = {**_ENTRY, "headword": None, "trailing_text": "vocale"}
         out = DictionaryEntry.model_validate(entry, context=_ctx(_ORPHAN_PNG))
-        assert out.is_orphan_fragment is True
+        assert out.headword is None
 
-    def test_aligned_layout_ai_false_raises_mismatch(self):
-        entry = {**_ENTRY, "is_orphan_fragment": False}
+    def test_aligned_layout_headword_present_raises_mismatch(self):
+        entry = {**_ENTRY}
         with pytest.raises(PydanticValidationError, match=r"AI extraction mismatch"):
             DictionaryEntry.model_validate(entry, context=_ctx(_ORPHAN_PNG))
 
     def test_index_not_zero_no_ops(self):
         # Second entry on a page: validator skips regardless of layout.
-        entry = {**_ENTRY, "is_orphan_fragment": False}
+        entry = {**_ENTRY}
         out = DictionaryEntry.model_validate(entry, context=_ctx(_HEADWORD_PNG, index=1))
-        assert out.is_orphan_fragment is False
+        assert out.headword == "a¹"
 
     def test_missing_image_payload_no_ops(self):
-        entry = {**_ENTRY, "is_orphan_fragment": False}
+        entry = {**_ENTRY}
         out = DictionaryEntry.model_validate(
             entry, context={"normalized_ocr": _MIN_OCR, "index": 0}
         )
-        assert out.is_orphan_fragment is False
+        assert out.headword == "a¹"
 
     def test_no_context_raises_grounding_error(self):
         # Layout validator itself skips (no image_payload); grounding
         # validators raise on missing normalized_ocr.
-        entry = {**_ENTRY, "is_orphan_fragment": False}
+        entry = {**_ENTRY}
         with pytest.raises(ValidationError, match=r"normalized_ocr context required"):
             DictionaryEntry.model_validate(entry)
 
     def test_mismatch_message_includes_threshold_and_values(self):
-        entry = {**_ENTRY, "is_orphan_fragment": True}
+        entry = {**_ENTRY, "headword": None, "trailing_text": "vocale"}
         with pytest.raises(
             PydanticValidationError,
             match=(
-                r"is_orphan_fragment=True.*expected=False.*"
+                r"headword=None.*expected.*headword present.*"
                 r"threshold=21\.0.*headword_delta=36\.0.*tolerance=15\.0"
             ),
         ):

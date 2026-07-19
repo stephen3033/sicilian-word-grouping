@@ -37,10 +37,10 @@ _DEFAULT_PREAMBLE = textwrap.dedent("""\
 
     ### TYPOGRAPHIC MAPPING RULES:
     - headword (str|null): The **bolded** lemma starting an entry. If two **bolded** words are separated by "e", generate separate entry objects for each, duplicating their shared trailing_text. Set null if page starts mid-definition.
-    - is_orphan_fragment (bool): true only if the page layout opens mid-definition (headword is null). Otherwise false.
     - trailing_text (str): Regular or *italic* body text (definitions, POS, senses) bounded between **bolded** words. Note: Ignore **bolded numbers** within body text; only **bolded words** signal a new entry boundary.
     - variants (list[str]|null): *Italicized* alternate spellings inside trailing_text preceded by markers: "v.", "anche", "Cfr.", or "v. Anche". Parse comma/ "e" separated italic sequences into clean array elements. Else null.
     - page_numbers (list[int]): Placeholder only. Always populate `page_numbers` with `[0]` for every entry. Do not infer page numbers from the OCR text or the image; the real page number is injected programmatically downstream.
+    - vs_vol (int): Placeholder only. Always populate `vs_vol` with `0` for every entry. Do not infer the volume from the OCR text or the image; the real volume number is injected programmatically downstream.
 
     ### OCR CORRECTION:
     - The OCR scan is imperfect: fix only obvious character failures (malformed glyph, broken diacritic, clearly wrong letter) as a side effect. Do not rewrite or clean OCR wholesale.

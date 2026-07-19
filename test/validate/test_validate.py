@@ -33,9 +33,9 @@ def _png_b64(line_specs: list[tuple[int, int, int, int]]) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-# |Δx|=60 > threshold -> headword layout (is_orphan_fragment=False expected).
+# |Δx|=60 > threshold -> headword layout (headword present expected).
 _HEADWORD_IMG_B64 = _png_b64([(100, 50, 600, 40), (160, 120, 600, 40)])
-# |Δx|=0 <= threshold -> orphan layout (is_orphan_fragment=True expected).
+# |Δx|=0 <= threshold -> orphan layout (headword=None expected).
 _ORPHAN_IMG_B64 = _png_b64([(100, 50, 600, 40), (100, 120, 600, 40)])
 
 
@@ -48,14 +48,14 @@ def _entry(
     trailing_text: str = "art. femm. la.",
     variants: list[str] | None = None,
     page_numbers: list[int] = (1,),
-    is_orphan_fragment: bool = False,
+    vs_vol: int = 0,
 ) -> dict:
     return {
         "headword": headword,
         "trailing_text": trailing_text,
         "variants": variants,
         "page_numbers": list(page_numbers),
-        "is_orphan_fragment": is_orphan_fragment,
+        "vs_vol": vs_vol,
     }
 
 
@@ -79,7 +79,6 @@ class TestValidateSuccess:
                         headword=None,
                         trailing_text="a¹ f. e (antiq.) m. vocale",
                         variants=None,
-                        is_orphan_fragment=True,
                     )
                 ]
             ),
@@ -130,14 +129,12 @@ class TestValidateSchemaConformance:
                 "headword": "a²",
                 "trailing_text": "...",
                 "variants": None,
-                "is_orphan_fragment": False,
             },
             {
                 "headword": "a²",
                 "trailing_text": "...",
                 "variants": None,
                 "page_numbers": "1",
-                "is_orphan_fragment": False,
             },
         ],
     )
@@ -154,7 +151,6 @@ class TestValidateSchemaConformance:
                     "headword": "a²",
                     "trailing_text": "...",
                     "variants": None,
-                    "is_orphan_fragment": False,
                 }
             ]
         )
@@ -211,13 +207,13 @@ class TestValidateTrailingText:
                 "trailing_text": None,
                 "variants": None,
                 "page_numbers": [1],
-                "is_orphan_fragment": False,
+                "vs_vol": 0,
             },
             {
                 "headword": "a²",
                 "variants": None,
                 "page_numbers": [1],
-                "is_orphan_fragment": False,
+                "vs_vol": 0,
             },
         ],
     )
@@ -268,7 +264,7 @@ class TestValidateGroundingContext:
         "trailing_text": "art. femm. la.",
         "variants": None,
         "page_numbers": [1],
-        "is_orphan_fragment": False,
+        "vs_vol": 0,
     }
 
     @pytest.mark.parametrize(

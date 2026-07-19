@@ -30,7 +30,7 @@ def validate(
 
     `ocr_text` is the prefix-stripped page OCR (ground truth for substring
     checks). `image_b64` is decoded once and threaded as `image_payload`
-    for the `is_orphan_fragment` layout heuristic on the first entry.
+    for the headword-null layout heuristic on the first entry.
 
     Raises `ValidationError` on any parse, schema, or grounding failure.
     """
