@@ -56,6 +56,10 @@ class Settings(BaseSettings):
         3,
         description="Maximum transform/validate retry attempts per page before the page fails and the pipeline aborts.",
     )
+    track_cost: bool = Field(
+        True,
+        description="Track per-call OpenRouter cost via response headers and emit a running tally plus a final COST SUMMARY line.",
+    )
 
     def pdf_path(self) -> Path:
         return self.data_dir / "columns" / f"VS{self.volume}-1col.pdf"

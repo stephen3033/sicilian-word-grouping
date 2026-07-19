@@ -202,6 +202,88 @@ class TestProcessPageRetries:
         assert rec.transform_calls == [(5, 1)]
 
 
+class TestCostSummaryGuarantee:
+    """The COST SUMMARY line must emit from main()'s finally block
+    whether the pipeline succeeds, a page fails fatally, or stitch raises."""
+
+    def _patch_pipeline(self, monkeypatch, tmp_path, process_page_fn, *, stitch_raises=False):
+        s = _settings(tmp_path, mode="running")
+        monkeypatch.setattr("src.main.get_settings", lambda: s)
+        monkeypatch.setattr("src.main._process_page_with_retries", process_page_fn)
+
+        if stitch_raises:
+            def _boom_stitch(entries_by_page, settings=None):
+                raise RuntimeError("stitch blew up")
+            monkeypatch.setattr("src.main.stitch", _boom_stitch)
+        else:
+            monkeypatch.setattr(
+                "src.main.stitch",
+                lambda entries_by_page, settings=None: tmp_path / "stitched.json",
+            )
+
+        calls: list[int] = []
+
+        def _spy_log_summary():
+            calls.append(1)
+
+        monkeypatch.setattr("src.main.log_summary", _spy_log_summary)
+        return s, calls
+
+    def test_summary_emitted_on_success(self, monkeypatch, tmp_path):
+        _, calls = self._patch_pipeline(
+            monkeypatch,
+            tmp_path,
+            lambda page, settings: [_entry(headword=f"p{page}")],
+        )
+        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
+
+        main()
+
+        assert calls == [1]
+
+    def test_summary_emitted_on_fatal_page_failure(self, monkeypatch, tmp_path):
+        def _fake(page, settings):
+            if page == 2:
+                raise ValidationError("page 2 unrecoverable")
+            return [_entry(headword=f"p{page}")]
+
+        _, calls = self._patch_pipeline(monkeypatch, tmp_path, _fake)
+        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+        assert excinfo.value.code == 1
+        # The finally block ran log_summary *before* SystemExit propagated.
+        assert calls == [1]
+
+    def test_summary_emitted_when_stitch_raises(self, monkeypatch, tmp_path):
+        _, calls = self._patch_pipeline(
+            monkeypatch,
+            tmp_path,
+            lambda page, settings: [_entry(headword=f"p{page}")],
+            stitch_raises=True,
+        )
+        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "2"])
+
+        with pytest.raises(RuntimeError, match="stitch blew up"):
+            main()
+        assert calls == [1]
+
+    def test_summary_skipped_when_track_cost_false(self, monkeypatch, tmp_path):
+        s, calls = self._patch_pipeline(
+            monkeypatch,
+            tmp_path,
+            lambda page, settings: [_entry(headword=f"p{page}")],
+        )
+        s.track_cost = False
+        monkeypatch.setattr("src.main.get_settings", lambda: s)
+        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
+
+        main()
+
+        assert calls == []
+
+
 class TestMainFlow:
     def test_fatal_page_stops_loop_and_stitches_succeeded_pages(
         self, monkeypatch, tmp_path

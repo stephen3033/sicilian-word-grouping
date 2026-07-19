@@ -8,6 +8,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.common.errors import ValidationError
+from src.common.cost import log_summary
 from src.common.logger import configure_logging, log_errors
 from src.config import Settings, get_settings
 from src.extract import extract_page_image, extract_page_text
@@ -57,6 +58,7 @@ def _transform_page(
         image_b64,
         SYSTEM_PROMPT,
         build_user_prompt(ocr_text),
+        page=page,
     )
     logger.info(
         "attempt %d ok (raw_json=%d chars)", attempt, len(raw_json)
@@ -200,26 +202,32 @@ def main() -> None:
         args.batch_size if args.batch_size is not None else "sequential",
     )
 
-    if args.batch_size is None:
-        entries_by_page, fatal = _run_sequential(args.start, args.end, settings)
-    else:
-        entries_by_page, fatal = _run_parallel(
-            args.start, args.end, args.batch_size, settings
+    try:
+        if args.batch_size is None:
+            entries_by_page, fatal = _run_sequential(args.start, args.end, settings)
+        else:
+            entries_by_page, fatal = _run_parallel(
+                args.start, args.end, args.batch_size, settings
+            )
+
+        stitched_path = stitch(entries_by_page, settings)
+        print(f"[load] stitched {len(entries_by_page)} pages -> {stitched_path}")
+        logger.info(
+            "pipeline end: pages=%d-%d stitched=%s entries=%d fatal=%s",
+            args.start,
+            args.end,
+            stitched_path,
+            sum(len(v) for v in entries_by_page.values()),
+            "yes" if fatal else "no",
         )
 
-    stitched_path = stitch(entries_by_page, settings)
-    print(f"[load] stitched {len(entries_by_page)} pages -> {stitched_path}")
-    logger.info(
-        "pipeline end: pages=%d-%d stitched=%s entries=%d fatal=%s",
-        args.start,
-        args.end,
-        stitched_path,
-        sum(len(v) for v in entries_by_page.values()),
-        "yes" if fatal else "no",
-    )
-
-    if fatal is not None:
-        sys.exit(1)
+        if fatal is not None:
+            sys.exit(1)
+    finally:
+        # Always emit the cost summary so the running tally survives even
+        # if a fatal page error, stitch failure, or sys.exit short-circuits.
+        if settings.track_cost:
+            log_summary()
 
 
 def _run_sequential(

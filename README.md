@@ -66,3 +66,32 @@ Kimi K2.6 - $0.062/page (failed at extracting the first page due to rate limits,
 Kimi K2.7 Code - $0.04965/page (did not get v. variants, extracts 1 line json, removed POS from trailing text)
 
 **NOTE:** The ideal cost to performance seems to be between $0.01-$0.05, Gemini 3.5 Flash, Claude Sonnet 4.6, GPT 5.4, and Kimi K2.7 Code
+
+---
+
+## Runtime Cost Tracking
+
+In addition to the static projection above, the pipeline records the
+**actual** OpenRouter cost of every LLM call while it runs and writes the
+tally to `logs/pipeline.log`.
+
+- **Per call** — each invocation of `extract_json` (`src/transform/client.py`)
+  logs `page N cost=$... (page_running=$... total=$... calls=...)` at INFO
+  level, so the running tally is visible as each page completes (including
+  failed retry attempts, since every call is billed).
+- **Final total** — a `COST SUMMARY total=$... across N LLM calls (M pages)`
+  line is emitted from a `finally` block in `src.main.main`, so it lands in
+  the logfile whether the pipeline succeeds, a page fails fatally, `stitch`
+  raises, or `sys.exit(1)` short-circuits.
+
+Cost is parsed from OpenRouter's response (the `x-or-cost-*` headers when
+present, falling back to a `usage.cost` body field) on every call. If no
+cost field is parseable for a given call, that call is counted as `$0` and
+logged at WARNING level so the gap is visible rather than silently swallowed.
+
+The accumulator (`src/common/cost.py`) is process-global and lock-protected,
+so the running tally is correct under the parallel runner's
+`ThreadPoolExecutor` as well as the default sequential loop.
+
+Set `VS_TRACK_COST=false` to disable tracking entirely (no per-call log
+line, no final summary).

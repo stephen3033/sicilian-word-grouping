@@ -4,13 +4,29 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+from src.common import cost as cost_module
 from src.config import Settings
 from src.transform.client import _get_client, extract_json
 
 _CANNED_CONTENT = '{"headword": "parrinu", "page_numbers": [42]}'
 
 _SYSTEM = "you are a lexicographer"
+
 _USER = "json_schema:\n...\nocr_page_text:\nfoo"
+
+
+class _FakeRawResponse:
+    """Mimics openai's `with_raw_response.create(...)` payload: `.parse()`
+    returns the typed ChatCompletion; `.headers` carries provider headers."""
+
+    def __init__(self, completion: SimpleNamespace, headers: dict[str, str]) -> None:
+        self._completion = completion
+        self.headers = headers
+
+    def parse(self) -> SimpleNamespace:
+        return self._completion
 
 
 class _FakeOpenAI:
@@ -22,15 +38,19 @@ class _FakeOpenAI:
         self.kwargs = kwargs
         self.last_create_kwargs: dict = {}
         self.chat = SimpleNamespace(
-            completions=SimpleNamespace(create=self._create)
+            completions=SimpleNamespace(
+                with_raw_response=SimpleNamespace(create=self._create)
+            )
         )
         _FakeOpenAI.instances.append(self)
 
     def _create(self, **kwargs):
         self.last_create_kwargs = kwargs
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=_CANNED_CONTENT))]
+        completion = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=_CANNED_CONTENT))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
+        return _FakeRawResponse(completion, headers={"x-or-cost-total": "0.0123"})
 
 
 def _patch(monkeypatch) -> Settings:
@@ -40,17 +60,18 @@ def _patch(monkeypatch) -> Settings:
     _get_client.cache_clear()
     _FakeOpenAI.instances.clear()
     monkeypatch.setattr("src.transform.client.OpenAI", _FakeOpenAI)
+    cost_module.reset()
     return s
 
 
 class TestExtractJson:
     def test_returns_raw_message_content_verbatim(self, monkeypatch):
         _patch(monkeypatch)
-        assert extract_json("b64abc", _SYSTEM, _USER) == _CANNED_CONTENT
+        assert extract_json("b64abc", _SYSTEM, _USER, page=7) == _CANNED_CONTENT
 
     def test_sends_system_then_vision_user_message(self, monkeypatch):
         s = _patch(monkeypatch)
-        extract_json("b64abc", _SYSTEM, _USER)
+        extract_json("b64abc", _SYSTEM, _USER, page=7)
 
         assert len(_FakeOpenAI.instances) == 1
         inst = _FakeOpenAI.instances[0]
@@ -74,3 +95,49 @@ class TestExtractJson:
             "image_url": {"url": "data:image/png;base64,b64abc"},
         }
         assert content[1] == {"type": "text", "text": _USER}
+
+
+class TestCostTracking:
+    def test_records_openrouter_cost_header(self, monkeypatch):
+        _patch(monkeypatch)
+        extract_json("b64abc", _SYSTEM, _USER, page=7)
+
+        assert cost_module._totals.calls == 1
+        assert cost_module._totals.total_cost == pytest.approx(0.0123)
+        assert cost_module._totals.by_page[7] == pytest.approx(0.0123)
+
+    def test_records_no_cost_when_header_missing(self, monkeypatch):
+        class _NoCostFakeOpenAI(_FakeOpenAI):
+            def _create(self, **kwargs):
+                raw = super()._create(**kwargs)
+                raw.headers = {}
+                return raw
+
+        s = _patch(monkeypatch)
+        monkeypatch.setattr("src.transform.client.OpenAI", _NoCostFakeOpenAI)
+        _get_client.cache_clear()
+        extract_json("b64abc", _SYSTEM, _USER, page=1)
+
+        assert cost_module._totals.calls == 1
+        assert cost_module._totals.total_cost == 0.0  # counted as 0
+        assert cost_module._totals.by_page[1] == 0.0
+
+    def test_accumulates_across_multiple_calls(self, monkeypatch):
+        _patch(monkeypatch)
+        extract_json("b64abc", _SYSTEM, _USER, page=1)
+        extract_json("b64abc", _SYSTEM, _USER, page=2)
+        extract_json("b64abc", _SYSTEM, _USER, page=2)  # retry on same page
+
+        assert cost_module._totals.calls == 3
+        assert cost_module._totals.total_cost == pytest.approx(0.0369)
+        assert cost_module._totals.by_page[1] == pytest.approx(0.0123)
+        assert cost_module._totals.by_page[2] == pytest.approx(0.0246)
+
+    def test_skips_recording_when_track_cost_false(self, monkeypatch):
+        s = _patch(monkeypatch)
+        s.track_cost = False
+        monkeypatch.setattr("src.transform.client.get_settings", lambda: s)
+        extract_json("b64abc", _SYSTEM, _USER, page=5)
+
+        assert cost_module._totals.calls == 0
+        assert cost_module._totals.total_cost == 0.0
