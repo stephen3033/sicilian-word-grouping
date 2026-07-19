@@ -100,7 +100,9 @@ def validate(
     # runs the pixel-based layout heuristic on the first entry only.
     normalized_ocr = normalization(ocr_text)
     image_payload = base64.b64decode(image_b64)
-    tolerance = get_settings().layout_tolerance
+    s = get_settings()
+    tolerance = s.layout_tolerance
+    headword_delta = s.headword_delta
     entries: list[DictionaryEntry] = []
     for i, raw_entry in enumerate(raw_entries):
         try:
@@ -111,7 +113,7 @@ def validate(
                         "normalized_ocr": normalized_ocr,
                         "index": i,
                         "image_payload": image_payload,
-                        "headword_indent_x": 0.0,
+                        "headword_delta": headword_delta,
                         "tolerance": tolerance,
                     },
                 )

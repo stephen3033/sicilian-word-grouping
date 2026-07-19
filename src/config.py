@@ -38,14 +38,24 @@ class Settings(BaseSettings):
     output_dir: Path = Path("test/data/transform/output")
     log_file: Path = Path("logs/pipeline.log")
     layout_tolerance: float = Field(
-        20.0,
+        15.0,
         description=(
-            "Pixel tolerance for the layout-verification heuristic on "
-            "`is_orphan_fragment`. The validator compares the left X of the "
-            "first two text lines on the rendered page; |Δx| > tolerance => "
-            "headword present (is_orphan_fragment=False). Validated at 200 "
-            "DPI against VS1 pp 1-973 (orphan max |Δx|=14, headword min "
-            "|Δx|=36). Override via VS_LAYOUT_TOLERANCE for other volumes."
+            "Fudge factor (px) for the layout-verification heuristic - "
+            "subtracted from `headword_delta` to yield the effective |Δx| "
+            "threshold. Accounts for scan skew/tilt. Validated at 200 DPI "
+            "against VS1 (observed orphan max |Δx|=14; 1px safety margin). "
+            "Override via VS_LAYOUT_TOLERANCE."
+        ),
+    )
+    headword_delta: float = Field(
+        36.0,
+        description=(
+            "Calibrated min |Δx| (px) between the first two text lines on "
+            "a headword page, at 200 DPI. Combined with `layout_tolerance` "
+            "as the decision boundary: |Δx| > (headword_delta - tolerance) "
+            "=> headword present (is_orphan_fragment=False). Validated "
+            "against VS1 pp 1-973 (observed headword |Δx| 36-59). Override "
+            "via VS_HEADWORD_DELTA for other volumes."
         ),
     )
 

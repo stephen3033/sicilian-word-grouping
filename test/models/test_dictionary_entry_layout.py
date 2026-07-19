@@ -126,7 +126,7 @@ class TestConvertImageToLayoutData:
 
 class TestAnalyzeFirstSpan:
     def test_large_x_difference_is_indented(self):
-        # Line1 at x=100, line2 at x=160 -> |Δx|=60 > tol=20 -> indented.
+        # |Δx|=60 > threshold (36-15=21) -> indented.
         png = _page_with_lines(
             [
                 (100, 50, 600, 40),
@@ -134,11 +134,11 @@ class TestAnalyzeFirstSpan:
             ]
         )
         data = _convert_image_to_layout_data(png)
-        _, is_indented = _analyze_first_span(data, indent_x=0.0, tolerance=20.0)
+        _, is_indented = _analyze_first_span(data, delta=36.0, tolerance=15.0)
         assert is_indented is True
 
     def test_small_x_difference_not_indented(self):
-        # Line1 at x=100, line2 at x=105 -> |Δx|=5 <= tol=20 -> not indented.
+        # |Δx|=5 <= threshold (36-15=21) -> not indented.
         png = _page_with_lines(
             [
                 (100, 50, 600, 40),
@@ -146,7 +146,7 @@ class TestAnalyzeFirstSpan:
             ]
         )
         data = _convert_image_to_layout_data(png)
-        _, is_indented = _analyze_first_span(data, indent_x=0.0, tolerance=20.0)
+        _, is_indented = _analyze_first_span(data, delta=36.0, tolerance=15.0)
         assert is_indented is False
 
     def test_zero_x_difference_not_indented(self):
@@ -157,13 +157,13 @@ class TestAnalyzeFirstSpan:
             ]
         )
         data = _convert_image_to_layout_data(png)
-        _, is_indented = _analyze_first_span(data, indent_x=0.0, tolerance=20.0)
+        _, is_indented = _analyze_first_span(data, delta=36.0, tolerance=15.0)
         assert is_indented is False
 
     def test_narrow_line_below_30px_width_ignored(self):
         # Line1 (width=600) at x=100; line2 is narrow (width=20) at x=500,
-        # line3 (width=600) at x=160. The narrow line should be skipped;
-        # the comparison uses line1 and line3 -> |Δx|=60 -> indented.
+        # line3 (width=600) at x=160. The narrow line is skipped; the
+        # comparison uses line1 and line3 -> |Δx|=60 > threshold -> indented.
         png = _page_with_lines(
             [
                 (100, 50, 600, 40),
@@ -172,26 +172,31 @@ class TestAnalyzeFirstSpan:
             ]
         )
         data = _convert_image_to_layout_data(png)
-        _, is_indented = _analyze_first_span(data, indent_x=0.0, tolerance=20.0)
+        _, is_indented = _analyze_first_span(data, delta=36.0, tolerance=15.0)
         assert is_indented is True
 
     def test_fewer_than_two_lines_defaults_to_not_indented(self):
         png = _page_with_lines([(100, 50, 600, 40)])
         data = _convert_image_to_layout_data(png)
-        _, is_indented = _analyze_first_span(data, indent_x=0.0, tolerance=20.0)
+        _, is_indented = _analyze_first_span(data, delta=36.0, tolerance=15.0)
         assert is_indented is False
 
-    def test_tolerance_boundary_exclusive(self):
-        # |Δx| exactly equal to tolerance is NOT indented (strict >).
-        png = _page_with_lines(
-            [
-                (100, 50, 600, 40),
-                (120, 120, 600, 40),  # |Δx|=20 == tolerance
-            ]
+    def test_threshold_boundary_exclusive(self):
+        # |Δx| exactly equal to the threshold (delta-tolerance=21) is NOT
+        # indented (strict >). |Δx|=22 (just above) IS indented.
+        png_at_threshold = _page_with_lines(
+            [(100, 50, 600, 40), (121, 120, 600, 40)]  # |Δx|=21 == threshold
         )
-        data = _convert_image_to_layout_data(png)
-        _, is_indented = _analyze_first_span(data, indent_x=0.0, tolerance=20.0)
+        data = _convert_image_to_layout_data(png_at_threshold)
+        _, is_indented = _analyze_first_span(data, delta=36.0, tolerance=15.0)
         assert is_indented is False
+
+        png_above_threshold = _page_with_lines(
+            [(100, 50, 600, 40), (122, 120, 600, 40)]  # |Δx|=22 > threshold
+        )
+        data = _convert_image_to_layout_data(png_above_threshold)
+        _, is_indented = _analyze_first_span(data, delta=36.0, tolerance=15.0)
+        assert is_indented is True
 
 
 # ---------------------------------------------------------------------------
@@ -207,12 +212,17 @@ _ENTRY = {
 }
 
 
-def _ctx(png: bytes, index: int = 0, tolerance: float = 20.0) -> dict:
+def _ctx(
+    png: bytes,
+    index: int = 0,
+    delta: float = 36.0,
+    tolerance: float = 15.0,
+) -> dict:
     return {
         "normalized_ocr": _MIN_OCR,
         "index": index,
         "image_payload": png,
-        "headword_indent_x": 0.0,
+        "headword_delta": delta,
         "tolerance": tolerance,
     }
 
@@ -295,7 +305,7 @@ class TestValidateLayoutAlignment:
         with pytest.raises(ValidationError, match=r"normalized_ocr context required"):
             DictionaryEntry.model_validate(entry)
 
-    def test_mismatch_message_includes_tolerance_and_values(self):
+    def test_mismatch_message_includes_threshold_and_values(self):
         png = _page_with_lines(
             [
                 (100, 50, 600, 40),
@@ -305,6 +315,9 @@ class TestValidateLayoutAlignment:
         entry = {**_ENTRY, "is_orphan_fragment": True}
         with pytest.raises(
             PydanticValidationError,
-            match=r"is_orphan_fragment=True.*expected=False.*tolerance=20.0",
+            match=(
+                r"is_orphan_fragment=True.*expected=False.*"
+                r"threshold=21\.0.*headword_delta=36\.0.*tolerance=15\.0"
+            ),
         ):
             DictionaryEntry.model_validate(entry, context=_ctx(png))

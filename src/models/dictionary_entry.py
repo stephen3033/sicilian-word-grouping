@@ -74,32 +74,33 @@ def _convert_image_to_layout_data(image_payload: bytes) -> dict:
 
 
 def _analyze_first_span(
-    layout_data: dict, indent_x: float, tolerance: float
+    layout_data: dict, delta: float, tolerance: float
 ) -> tuple[bool, bool]:
     """Compare the first two real text lines and return ``(is_bold, is_indented)``.
 
     ``is_indented`` is ``True`` when the left X of the first two text lines
     (each wider than 30px to drop marginalia/noise) differ by more than
-    ``tolerance`` pixels. This relative comparison (rather than an absolute
-    X coordinate) accommodates the varying scan margins across VS volumes:
-    a headword page has an outdented headword token whose X differs from
-    the body's X by ~36-60px at 200 DPI, while an orphan-continuation page
-    has all lines aligned within ~5px.
+    ``delta - tolerance`` pixels. ``delta`` is the calibrated min |Δx|
+    observed on headword pages (200 DPI); ``tolerance`` is the fudge factor
+    subtracted from it to account for scan skew/tilt. This relative
+    comparison (rather than an absolute X coordinate) accommodates the
+    varying scan margins across VS volumes: a headword page has an
+    outdented headword token whose X differs from the body's X by
+    ~36-60px at 200 DPI, while an orphan-continuation page has all lines
+    aligned within ~5px.
 
     ``is_bold`` is always ``True`` (no-op axis). Bold detection via ink
     density was empirically unreliable at 200 DPI for the VS font (bold
     density 0.15-0.26 overlaps body 0.12-0.18); the indent signal alone
     correctly classifies all 32 validated pages. The axis is retained for
     signature parity with the reference template's truth table.
-
-    ``indent_x`` is accepted for signature parity but unused (relative
-    comparison mode).
     """
     lines = layout_data.get("lines", [])
     real = [ln for ln in lines if ln["width"] > 30]
     if len(real) < 2:
         return True, False
-    is_indented = abs(real[0]["left_x"] - real[1]["left_x"]) > tolerance
+    threshold = delta - tolerance
+    is_indented = abs(real[0]["left_x"] - real[1]["left_x"]) > threshold
     return True, is_indented
 
 
@@ -187,10 +188,15 @@ class DictionaryEntry(BaseModel):
         on the rendered page image (pixel-based; the VS PDFs are rasterized
         scans with no text layer):
 
-        - ``|Δx| > tolerance`` -> lines at different X -> a headword token is
-          present -> expected ``is_orphan_fragment = False``.
-        - ``|Δx| ≤ tolerance`` -> lines aligned -> continuation/orphan ->
-          expected ``is_orphan_fragment = True``.
+        - ``|Δx| > (headword_delta - tolerance)`` -> lines at different X ->
+          a headword token is present -> expected ``is_orphan_fragment = False``.
+        - ``|Δx| ≤ (headword_delta - tolerance)`` -> lines aligned ->
+          continuation/orphan -> expected ``is_orphan_fragment = True``.
+
+        ``headword_delta`` is the calibrated min |Δx| observed on headword
+        pages (200 DPI); ``tolerance`` is the fudge factor subtracted from
+        it to account for scan skew/tilt. Both are sourced from
+        ``Settings`` and threaded through the validation context.
 
         If the AI-supplied value disagrees with the layout-derived
         expectation, a ``ValueError`` is raised detailing the mismatch. The
@@ -205,12 +211,12 @@ class DictionaryEntry(BaseModel):
             return v
 
         payload = ctx["image_payload"]
-        tolerance = ctx.get("tolerance", 20.0)
-        indent_x = ctx.get("headword_indent_x", 0.0)  # unused (relative mode)
+        delta = ctx.get("headword_delta", 36.0)
+        tolerance = ctx.get("tolerance", 15.0)
 
         try:
             layout_data = _convert_image_to_layout_data(payload)
-            _, is_indented = _analyze_first_span(layout_data, indent_x, tolerance)
+            _, is_indented = _analyze_first_span(layout_data, delta, tolerance)
 
             if is_indented:
                 expected_is_orphan = False
@@ -221,7 +227,8 @@ class DictionaryEntry(BaseModel):
                 raise ValueError(
                     f"AI extraction mismatch. Model flagged page start as "
                     f"is_orphan_fragment={v}, but physical layout heuristics "
-                    f"expected={expected_is_orphan} (first-two-line |Δx| vs "
+                    f"expected={expected_is_orphan} (|Δx| threshold="
+                    f"{delta - tolerance} from headword_delta={delta} - "
                     f"tolerance={tolerance})."
                 )
         except ValueError:
