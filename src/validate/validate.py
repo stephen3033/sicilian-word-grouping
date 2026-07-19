@@ -64,7 +64,7 @@ def validate(
         ValidationError: on any parse, schema, or grounding failure.
     """
     logger.debug(
-        "validate: raw_json=%d chars ocr=%d chars image=%d b64",
+        "raw_json=%d chars ocr=%d chars image=%d b64",
         len(raw_json),
         len(ocr_text),
         len(image_b64),
@@ -74,21 +74,17 @@ def validate(
     try:
         payload = json.loads(raw_json)
     except json.JSONDecodeError as e:
-        logger.error("validate: raw payload is not valid JSON: %s", e)
         raise ValidationError(f"raw payload is not valid JSON: {e}") from e
 
     # --- 2. Unwrap entries ---------------------------------------------
     if not isinstance(payload, dict) or "entries" not in payload:
-        logger.error("validate: payload missing top-level 'entries' key")
         raise ValidationError("payload missing top-level 'entries' key")
     raw_entries = payload["entries"]
     if not isinstance(raw_entries, list):
-        logger.error(
-            "validate: 'entries' is not a list (got %s)",
-            type(raw_entries).__name__,
+        raise ValidationError(
+            f"'entries' is not a list (got {type(raw_entries).__name__})"
         )
-        raise ValidationError("'entries' is not a list")
-    logger.debug("validate: unwrapped %d entries", len(raw_entries))
+    logger.debug("unwrapped %d entries", len(raw_entries))
 
     # --- 3. Schema conformance + grounding -----------------------------
     # The page's OCR text is normalized once here; every per-entry
@@ -120,14 +116,11 @@ def validate(
                     },
                 )
             )
-            logger.debug("validate: entry %d schema + grounding ok", i)
+            logger.debug("entry %d schema + grounding ok", i)
         except PydanticValidationError as e:
-            logger.error(
-                "validate: entry %d failed schema conformance: %s", i, e
-            )
             raise ValidationError(
                 f"entry {i} failed schema conformance: {e}"
             ) from e
 
-    logger.info("validate: %d entries passed", len(entries))
+    logger.info("%d entries passed", len(entries))
     return entries

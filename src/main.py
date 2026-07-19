@@ -21,7 +21,7 @@ def _extract_page(page: int, settings: Settings) -> tuple[str, str]:
     image_b64 = extract_page_image(page)
     ocr_text = extract_page_text(page)
     logger.info(
-        "extract: page %d ok (image=%d b64, ocr=%d chars)",
+        "page %d ok (image=%d b64, ocr=%d chars)",
         page,
         len(image_b64),
         len(ocr_text),
@@ -37,7 +37,7 @@ def _transform_page(image_b64: str, ocr_text: str, settings: Settings) -> str:
         SYSTEM_PROMPT,
         build_user_prompt(ocr_text),
     )
-    logger.info("transform: ok (raw_json=%d chars)", len(raw_json))
+    logger.info("ok (raw_json=%d chars)", len(raw_json))
     return raw_json
 
 
@@ -47,7 +47,7 @@ def _validate_page(
 ) -> list[DictionaryEntry]:
     """Validate layer: schema + grounding + layout checks; raises on failure."""
     entries = validate(raw_json, ocr_text, image_b64)
-    logger.info("validate: ok (%d entries)", len(entries))
+    logger.info("ok (%d entries)", len(entries))
     return entries
 
 
@@ -61,7 +61,7 @@ def _process_page(page: int, settings: Settings) -> None:
     out_path = settings.output_dir / f"VS{settings.volume}_page_{page}_output.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(raw_json, encoding="utf-8")
-    logger.debug("process_page: wrote %s", out_path)
+    logger.debug("wrote %s", out_path)
 
     _validate_page(raw_json, ocr_text, image_b64, settings)
     logger.info("page %d: complete", page)
@@ -93,8 +93,6 @@ def main() -> None:
         try:
             _process_page(page, settings)
             print(f"[page {page}] wrote {settings.output_dir}/VS{settings.volume}_page_{page}_output.json")
-        except KeyError:
-            raise
         except Exception as e:
             print(f"[page {page}] failed: {e}")
 

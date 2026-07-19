@@ -22,7 +22,6 @@ def extract_page_image(page_number: int) -> str:
     pdf_path = s.pdf_path()
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
-    logger.debug("extract_page_image: opening %s", pdf_path)
 
     with pymupdf.open(pdf_path) as doc:
         printed_page_count = doc.page_count // 2
@@ -31,32 +30,28 @@ def extract_page_image(page_number: int) -> str:
                 f"page_number {page_number} out of range [1, {printed_page_count}]"
                 f" for {pdf_path.name}"
             )
-        logger.debug(
-            "extract_page_image: page %d of %d, dpi=%d",
-            page_number,
-            printed_page_count,
-            s.image_dpi,
-        )
         left_img = _render_page(doc, 2 * page_number - 2, s.image_dpi)
         right_img = _render_page(doc, 2 * page_number - 1, s.image_dpi)
 
+    composite = _composite(left_img, right_img, s.column_layout)
+    buf = io.BytesIO()
+    composite.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64 = base64.b64encode(png_bytes).decode("ascii")
     logger.debug(
-        "extract_page_image: left=%dx%d right=%dx%d layout=%s",
+        "page %d/%d dpi=%d left=%dx%d right=%dx%d composite=%dx%d "
+        "layout=%s png=%d bytes b64=%d chars",
+        page_number,
+        printed_page_count,
+        s.image_dpi,
         left_img.width,
         left_img.height,
         right_img.width,
         right_img.height,
-        s.column_layout,
-    )
-    composite = _composite(left_img, right_img, s.column_layout)
-    buf = io.BytesIO()
-    composite.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    logger.debug(
-        "extract_page_image: composite=%dx%d png=%d bytes b64=%d chars",
         composite.width,
         composite.height,
-        len(buf.getvalue()),
+        s.column_layout,
+        len(png_bytes),
         len(b64),
     )
     return b64

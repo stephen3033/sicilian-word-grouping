@@ -90,16 +90,15 @@ def build_user_prompt(page_text: str) -> str:
     """Compile the model-specific preamble + DictionaryEntry schema + OCR text."""
     s = get_settings()
     preamble = _preamble_for(s.model)
-    logger.debug(
-        "build_user_prompt: model=%s preamble=%d chars", s.model, len(preamble)
-    )
     prompt = _USER_TEMPLATE.format(
         preamble=preamble,
         schema_json=json.dumps(DictionaryEntry.model_json_schema(), indent=2),
         page_text=page_text,
     )
     logger.debug(
-        "build_user_prompt: prompt=%d chars ocr=%d chars",
+        "model=%s preamble=%d chars prompt=%d chars ocr=%d chars",
+        s.model,
+        len(preamble),
         len(prompt),
         len(page_text),
     )

@@ -20,9 +20,7 @@ def _build_index(ocr_path: str, _mtime: float) -> dict[int, list[str]]:
             if not page_str.isdigit():
                 raise KeyError("Bad page number!!")
             index.setdefault(int(page_str), []).append(line)
-    logger.debug(
-        "_build_index: %s -> %d pages", ocr_path, len(index)
-    )
+    logger.debug("indexed %s -> %d pages", ocr_path, len(index))
     return index
 
 
@@ -39,25 +37,22 @@ def extract_page_text(page_number: int) -> str:
     ocr_path = s.ocr_txt_path()
     if not ocr_path.exists():
         raise FileNotFoundError(f"OCR txt not found: {ocr_path}")
-    logger.debug("extract_page_text: opening %s", ocr_path)
 
     # mtime in the key invalidates the cache when the volume or file changes.
     index = _build_index(str(ocr_path), ocr_path.stat().st_mtime)
     lines = index.get(page_number, [])
     if not lines:
         raise KeyError(f"No OCR text for page {page_number}")
-    logger.debug(
-        "extract_page_text: page %d -> %d lines, strip_prefix=%s",
-        page_number,
-        len(lines),
-        s.strip_ocr_prefix,
-    )
 
     if not s.strip_ocr_prefix:
         body = "\n".join(lines)
     else:
         body = "\n".join(line.partition(" ")[2] for line in lines)
     logger.debug(
-        "extract_page_text: page %d body=%d chars", page_number, len(body)
+        "page %d lines=%d body=%d chars strip_prefix=%s",
+        page_number,
+        len(lines),
+        len(body),
+        s.strip_ocr_prefix,
     )
     return body

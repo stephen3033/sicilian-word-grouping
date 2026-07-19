@@ -26,12 +26,6 @@ def _get_client() -> OpenAI:
 def extract_json(base64_image: str, system_prompt: str, user_prompt: str) -> str:
     """Send image + system/user prompts to the VLM; return raw response text."""
     s = get_settings()
-    logger.debug(
-        "extract_json: calling VLM model=%s image=%d chars prompt=%d chars",
-        s.model,
-        len(base64_image),
-        len(user_prompt),
-    )
     response = _get_client().chat.completions.create(
         model=s.model,
         response_format={"type": "json_object"},  # Hard rail: Forces raw JSON output
@@ -54,6 +48,10 @@ def extract_json(base64_image: str, system_prompt: str, user_prompt: str) -> str
     # Fallback to empty string if content returns None
     content = response.choices[0].message.content or ""
     logger.debug(
-        "extract_json: response=%d chars", len(content)
+        "model=%s image=%d chars prompt=%d chars response=%d chars",
+        s.model,
+        len(base64_image),
+        len(user_prompt),
+        len(content),
     )
     return content
