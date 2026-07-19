@@ -1,4 +1,4 @@
-"""Pipeline logging: single FileHandler, `src` at DEBUG, libraries at ERROR.
+"""Pipeline logging: single FileHandler, `src` level mode-driven, libraries at ERROR.
 
 Format embeds `%(funcName)s` between logger name and message:
 ``%(asctime)s [%(levelname)s] %(name)s.%(funcName)s: %(message)s``.
@@ -15,8 +15,17 @@ from src.common.errors import ValidationError
 _QUIET_LIB_LOGGERS = ("openai", "httpx", "pydantic")
 
 
-def configure_logging(log_file: Path) -> None:
-    """Configure root + `src` loggers with one FileHandler. Idempotent."""
+def configure_logging(
+    log_file: Path, src_level: int = logging.INFO
+) -> None:
+    """Configure root + `src` loggers with one FileHandler. Idempotent.
+
+    `src_level` is the level for the `src` package logger: `logging.DEBUG`
+    in debug mode (verbose per-entry / per-page traces), `logging.INFO` in
+    running mode (per-page summaries only). Root logger stays at WARNING
+    and the third-party library loggers in `_QUIET_LIB_LOGGERS` are pinned
+    to ERROR, so library chatter never reaches the logfile.
+    """
     log_file = Path(log_file)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -34,7 +43,7 @@ def configure_logging(log_file: Path) -> None:
     )
     root.addHandler(handler)
     root.setLevel(logging.WARNING)
-    logging.getLogger("src").setLevel(logging.DEBUG)
+    logging.getLogger("src").setLevel(src_level)
     for name in _QUIET_LIB_LOGGERS:
         logging.getLogger(name).setLevel(logging.ERROR)
 

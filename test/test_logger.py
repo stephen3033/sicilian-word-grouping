@@ -100,9 +100,19 @@ class TestConfigureLogging:
         for name in ("openai", "httpx", "pydantic"):
             assert logging.getLogger(name).level == logging.ERROR
 
-    def test_src_logger_at_debug(self, tmp_path: Path):
+    def test_src_logger_defaults_to_info(self, tmp_path: Path):
         log_file = tmp_path / "pipeline.log"
         configure_logging(log_file)
+        assert logging.getLogger("src").level == logging.INFO
+
+    def test_src_logger_at_info_when_requested(self, tmp_path: Path):
+        log_file = tmp_path / "pipeline.log"
+        configure_logging(log_file, src_level=logging.INFO)
+        assert logging.getLogger("src").level == logging.INFO
+
+    def test_src_logger_at_debug_when_requested(self, tmp_path: Path):
+        log_file = tmp_path / "pipeline.log"
+        configure_logging(log_file, src_level=logging.DEBUG)
         assert logging.getLogger("src").level == logging.DEBUG
 
     def test_root_logger_at_warning(self, tmp_path: Path):
@@ -120,7 +130,7 @@ class TestConfigureLogging:
 
     def test_format_includes_funcname(self, tmp_path: Path):
         log_file = tmp_path / "pipeline.log"
-        configure_logging(log_file)
+        configure_logging(log_file, src_level=logging.DEBUG)
         logging.getLogger("src.test").debug("hello", stacklevel=2)
         for h in logging.getLogger().handlers:
             h.flush()

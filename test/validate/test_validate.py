@@ -5,13 +5,15 @@ from __future__ import annotations
 import base64
 import io
 import json
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
 
 from src.common.errors import ValidationError
+from src.config import Settings
 from src.models import DictionaryEntry
-from src.validate.validate import validate
+from src.validate.validate import persist_validated_page, validate
 
 _OCR = (
     "1 a¹ f. e (antiq.) m. vocale e prima lettera dell'alfabeto.\n"
@@ -47,7 +49,7 @@ def _entry(
     headword: str | None = "a²",
     trailing_text: str = "art. femm. la.",
     variants: list[str] | None = None,
-    page_numbers: list[int] = (1,),
+    page_numbers: list[int] = (0,),
     vs_vol: int = 0,
 ) -> dict:
     return {
@@ -65,6 +67,7 @@ class TestValidateSuccess:
             _payload([_entry(headword="a²", variants=["la¹", "u2"])]),
             _OCR,
             _HEADWORD_IMG_B64,
+            1,
         )
         assert len(out) == 1
         assert isinstance(out[0], DictionaryEntry)
@@ -84,6 +87,7 @@ class TestValidateSuccess:
             ),
             _OCR,
             _ORPHAN_IMG_B64,
+            1,
         )
         assert len(out) == 1
         assert out[0].headword is None
@@ -91,7 +95,7 @@ class TestValidateSuccess:
 
     def test_empty_variants_list_skips_grounding(self):
         out = validate(
-            _payload([_entry(variants=[])]), _OCR, _HEADWORD_IMG_B64
+            _payload([_entry(variants=[])]), _OCR, _HEADWORD_IMG_B64, 1
         )
         assert out[0].variants == []
 
@@ -103,8 +107,34 @@ class TestValidateSuccess:
                 _entry(headword="a³", trailing_text="pron. femm. la.", variants=["la²", "u³"]),
             ]
         )
-        out = validate(raw, _OCR, _HEADWORD_IMG_B64)
+        out = validate(raw, _OCR, _HEADWORD_IMG_B64, 1)
         assert [e.headword for e in out] == ["a¹", "a²", "a³"]
+
+
+class TestValidateDeterministicInjection:
+    """vs_vol + page_numbers are injected in the same per-entry pass; no second iteration."""
+
+    def test_injects_volume_and_page_number_overriding_model_placeholders(self):
+        out = validate(
+            _payload([_entry(page_numbers=[0], vs_vol=0)]),
+            _OCR,
+            _HEADWORD_IMG_B64,
+            page_number=42,
+        )
+        assert out[0].vs_vol == 1  # settings.volume default
+        assert out[0].page_numbers == [42]
+
+    def test_injection_applies_to_every_entry_not_just_first(self):
+        raw = _payload(
+            [
+                _entry(headword="a¹", trailing_text="vocale"),
+                _entry(headword="a²", variants=["la¹", "u2"]),
+                _entry(headword="a³", trailing_text="pron. femm. la.", variants=["la²", "u³"]),
+            ]
+        )
+        out = validate(raw, _OCR, _HEADWORD_IMG_B64, page_number=7)
+        assert all(e.vs_vol == 1 for e in out)
+        assert all(e.page_numbers == [7] for e in out)
 
 
 class TestValidateParseFailures:
@@ -118,7 +148,7 @@ class TestValidateParseFailures:
     )
     def test_parse_failure_raises(self, raw, match):
         with pytest.raises(ValidationError, match=match):
-            validate(raw, _OCR, _HEADWORD_IMG_B64)
+            validate(raw, _OCR, _HEADWORD_IMG_B64, 1)
 
 
 class TestValidateSchemaConformance:
@@ -140,7 +170,7 @@ class TestValidateSchemaConformance:
     )
     def test_schema_failure_raises(self, entry_dict):
         with pytest.raises(ValidationError, match="schema conformance"):
-            validate(_payload([entry_dict]), _OCR, _HEADWORD_IMG_B64)
+            validate(_payload([entry_dict]), _OCR, _HEADWORD_IMG_B64, 1)
 
     def test_schema_failure_skips_grounding_check(self):
         # headword 'a²' is valid against OCR, but page_numbers is missing so
@@ -155,20 +185,20 @@ class TestValidateSchemaConformance:
             ]
         )
         with pytest.raises(ValidationError, match="schema conformance"):
-            validate(raw, _OCR, _HEADWORD_IMG_B64)
+            validate(raw, _OCR, _HEADWORD_IMG_B64, 1)
 
 
 class TestValidateGrounding:
     def test_headword_not_in_ocr_raises(self):
         with pytest.raises(ValidationError, match="headword 'xyzzy' not found"):
             validate(
-                _payload([_entry(headword="xyzzy")]), _OCR, _HEADWORD_IMG_B64
+                _payload([_entry(headword="xyzzy")]), _OCR, _HEADWORD_IMG_B64, 1
             )
 
     def test_variant_not_in_ocr_raises(self):
         raw = _payload([_entry(variants=["la¹", "nope"])])
         with pytest.raises(ValidationError, match="variant 'nope' not found"):
-            validate(raw, _OCR, _HEADWORD_IMG_B64)
+            validate(raw, _OCR, _HEADWORD_IMG_B64, 1)
 
     def test_headword_grounding_check_happens_before_variants(self):
         with pytest.raises(ValidationError, match="headword 'xyzzy' not found"):
@@ -176,17 +206,18 @@ class TestValidateGrounding:
                 _payload([_entry(headword="xyzzy", variants=["also_missing"])]),
                 _OCR,
                 _HEADWORD_IMG_B64,
+                1,
             )
 
     def test_entries_checked_in_order_second_fails(self):
         raw = _payload([_entry(headword="a²"), _entry(headword="xyzzy")])
         with pytest.raises(ValidationError, match="entry 1 headword 'xyzzy'"):
-            validate(raw, _OCR, _HEADWORD_IMG_B64)
+            validate(raw, _OCR, _HEADWORD_IMG_B64, 1)
 
 
 class TestValidateTrailingText:
     def test_trailing_text_present_in_ocr_passes(self):
-        out = validate(_payload([_entry()]), _OCR, _HEADWORD_IMG_B64)
+        out = validate(_payload([_entry()]), _OCR, _HEADWORD_IMG_B64, 1)
         assert out[0].trailing_text == "art. femm. la."
 
     def test_trailing_text_not_in_ocr_raises(self):
@@ -197,6 +228,7 @@ class TestValidateTrailingText:
                 _payload([_entry(trailing_text="xyzzy")]),
                 _OCR,
                 _HEADWORD_IMG_B64,
+                1,
             )
 
     @pytest.mark.parametrize(
@@ -219,7 +251,7 @@ class TestValidateTrailingText:
     )
     def test_trailing_text_schema_failure_raises(self, entry_dict):
         with pytest.raises(ValidationError, match=r"schema conformance"):
-            validate(_payload([entry_dict]), _OCR, _HEADWORD_IMG_B64)
+            validate(_payload([entry_dict]), _OCR, _HEADWORD_IMG_B64, 1)
 
     def test_trailing_text_normalized_whitespace_match_passes(self):
         # Raw `in` would miss the embedded newline; normalization() collapses
@@ -228,6 +260,7 @@ class TestValidateTrailingText:
             _payload([_entry(headword="a¹", trailing_text="vocale\ne prima")]),
             _OCR,
             _HEADWORD_IMG_B64,
+            1,
         )
         assert out[0].trailing_text == "vocale\ne prima"
 
@@ -241,6 +274,7 @@ class TestValidateTrailingText:
             ),
             ocr,
             _HEADWORD_IMG_B64,
+            1,
         )
         assert out[0].trailing_text == "art. femm. la. caffe\u0301."
 
@@ -253,6 +287,7 @@ class TestValidateTrailingText:
                 _payload([_entry(headword="xyzzy", trailing_text="plugh")]),
                 _OCR,
                 _HEADWORD_IMG_B64,
+                1,
             )
 
 
@@ -283,4 +318,30 @@ class TestValidateGroundingContext:
     @pytest.mark.parametrize("ocr", ["", "   "])
     def test_validate_with_empty_ocr_raises(self, ocr):
         with pytest.raises(ValidationError, match=r"normalized_ocr context required"):
-            validate(_payload([self._ENTRY]), ocr, _HEADWORD_IMG_B64)
+            validate(_payload([self._ENTRY]), ocr, _HEADWORD_IMG_B64, 1)
+
+
+class TestPersistValidatedPage:
+    """persist_validated_page writes the injected entries to the expected path."""
+
+    def test_writes_expected_path_and_payload(self, tmp_path: Path):
+        settings = Settings(output_dir=tmp_path)
+        entries = validate(
+            _payload([_entry(headword="a²", variants=["la¹", "u2"])]),
+            _OCR,
+            _HEADWORD_IMG_B64,
+            page_number=5,
+        )
+        written = persist_validated_page(entries, 5, settings)
+        expected = (
+            tmp_path
+            / "vol_1"
+            / "pages"
+            / "VS1_page_005_anthropic-claude-sonnet-4.6.json"
+        )
+        assert written == expected
+        assert written.exists()
+        payload = json.loads(written.read_text(encoding="utf-8"))
+        assert list(payload.keys()) == ["entries"]
+        assert payload["entries"][0]["vs_vol"] == 1
+        assert payload["entries"][0]["page_numbers"] == [5]
