@@ -201,6 +201,33 @@ class TestProcessPageRetries:
         # Only one transform call; no retry on non-ValidationError.
         assert rec.transform_calls == [(5, 1)]
 
+    def test_validation_error_in_transform_is_retried(
+        self, monkeypatch, tmp_path
+    ):
+        # e.g. the client's empty-choices guard: a transient provider glitch
+        # raises ValidationError from the transform layer and must retry.
+        s = _settings(tmp_path)
+        rec = _Recorder()
+        ext, tr, mk_val = _patch_layers(monkeypatch, rec, s)
+
+        def _flaky_transform(image, ocr, page, settings, attempt=1):
+            if attempt == 1:
+                rec.transform_calls.append((page, attempt))
+                raise ValidationError("model returned no choices")
+            return tr(image, ocr, page, settings, attempt=attempt)
+
+        monkeypatch.setattr("src.main._extract_page", ext)
+        monkeypatch.setattr("src.main._transform_page", _flaky_transform)
+        monkeypatch.setattr("src.main._validate_page", mk_val(set()))
+
+        out = _process_page_with_retries(5, s)
+
+        assert rec.transform_calls == [(5, 1), (5, 2)]
+        assert len(out) == 1
+        # No raw_json existed for the failed attempt, so nothing was persisted
+        # to raw_page_path.
+        assert not s.raw_page_path(5, s.model).exists()
+
 
 class TestCostSummaryGuarantee:
     """The COST SUMMARY line must emit from main()'s finally block

@@ -6,7 +6,7 @@ import re
 import unicodedata
 
 
-def normalization(text: str) -> str:
+def normalize(text: str) -> str:
     """NFC + collapse whitespace. No lowercasing or character alteration."""
     text = unicodedata.normalize("NFC", text)
     return re.sub(r"\s+", " ", text)

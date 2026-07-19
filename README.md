@@ -9,7 +9,7 @@ The system is split into four isolated, data-driven layers:
 1. **Extract (E):** Renders a printed page of the active VS volume to a Base64 PNG (compositing its two physical PDF pages) and reads the matching OCR text block from a pre-rendered txt file.
 2. **Transform (T):** Compiles a single prompt (preamble + `DictionaryEntry` JSON schema + OCR text) and sends it with the page image to an OpenAI-compatible VLM; returns raw JSON. `src/main.py` orchestrates a configurable `--start`/`--end` printed-page range, running E -> T per page (persisting raw JSON in debug mode, or on first-attempt validation failure in running mode).
 3. **Validate (V):** Unwraps `{"entries": [...]}`, checks Pydantic schema conformance, grounds `headword`/`variants`/`trailing_text` against the OCR text, and applies a pixel-based first-entry layout heuristic — all without a golden dataset.
-4. **Load (L):** Stitches validated per-page entries into a single volume JSON with a metadata envelope (`volume`, `model`, `page_count`, `entry_count`).
+4. **Load (L):** Stitches validated per-page entries into a single volume JSON with a metadata envelope (`volume`, `model`, `pages`, `page_count`, `entry_count`).
 
 ---
 
@@ -42,7 +42,7 @@ The two extractors share a common addressing scheme: the integer argument is the
 
 ## Load Layer
 
-- **`stitch`** (`src/load/load.py`): the only layer that always writes to disk (both modes). Emits `vs_<vol>_<model>.json` with a metadata envelope (`volume`, `model`, `page_count`, `entry_count`) and a flat `entries` list in page order.
+- **`stitch`** (`src/load/load.py`): the only layer that always writes to disk (both modes). Emits `vs_<vol>_<model>.json` with a metadata envelope (`volume`, `model`, `pages`, `page_count`, `entry_count`) and a flat `entries` list in page order. The `pages` list records exactly which printed pages were stitched, so partial output after a fatal run is self-describing.
 - **`read_pages_from_disk`**: standalone re-run entry point for debug-mode resumability; reads per-page JSON previously written by `persist_validated_page` and bypasses re-validation via `model_construct` (grounding OCR isn't available at load time).
 
 ---
@@ -86,7 +86,7 @@ op run --env-file=.env -- uv run sicilian-word-grouping --start <n> --end <m> [-
 
 ### Retry & Fatal Behavior
 
-`VS_MAX_ATTEMPTS`-bounded T→V retries per page. First fatal page stops the run; partial progress still stitched to disk. Exit code is non-zero on any fatal failure.
+`VS_MAX_ATTEMPTS`-bounded T→V retries per page, triggered by validation failures or a provider response with no choices; any other exception is immediately fatal. First fatal page stops the run; partial progress still stitched to disk. Exit code is non-zero on any fatal failure.
 
 ---
 
@@ -132,6 +132,6 @@ The pipeline records the **actual** OpenRouter cost of every LLM call and writes
 
 - **Per call** — `extract_json` (`src/transform/client.py`) logs `page N cost=$... (page_running=$... total=$... calls=...)` at INFO level (failed retry attempts are billed and counted).
 - **Final total** — a `COST SUMMARY total=$... across N LLM calls (M pages)` line is emitted from a `finally` block in `src.main.main`, so it lands in the logfile on success, fatal page failure, stitch failure, or `sys.exit(1)`.
-- **Parsing** — cost is parsed from OpenRouter's `x-or-cost-*` headers, falling back to a `usage.cost` body field. Unparseable calls count as `$0` and log a WARNING.
+- **Parsing** — every request asks OpenRouter to include the billed cost in the response body (`usage: {include: true}`); cost is parsed from the `x-or-cost-*` headers first, falling back to the `usage.cost` body field. Unparseable calls count as `$0` and log a WARNING.
 - **Concurrency** — the accumulator (`src/common/cost.py`) is process-global and lock-protected, so the tally is correct under `--batch-size` parallelism.
 - **Opt-out** — set `VS_TRACK_COST=false` to disable tracking entirely.

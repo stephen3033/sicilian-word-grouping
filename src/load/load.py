@@ -36,6 +36,8 @@ def stitch(
 ) -> Path:
     """Concatenate validated entries (in page order) into one volume JSON.
 
+    The envelope's ``pages`` list records exactly which printed pages were
+    stitched, so partial output after a fatal run is self-describing.
     Returns the path written. Parents are created as needed.
     """
     if settings is None:
@@ -51,6 +53,7 @@ def stitch(
     payload = {
         "volume": settings.volume,
         "model": settings.model,
+        "pages": ordered_pages,
         "page_count": len(ordered_pages),
         "entry_count": len(all_entries),
         "entries": [e.model_dump() for e in all_entries],

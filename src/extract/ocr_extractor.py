@@ -11,14 +11,22 @@ logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=8)
 def _build_index(ocr_path: str, _mtime: float) -> dict[int, list[str]]:
-    """Build {printed_page: [raw_lines...]} by scanning the OCR txt once."""
+    """Build {printed_page: [raw_lines...]} by scanning the OCR txt once.
+
+    Blank lines are skipped (VS volumes 2-5 contain thousands of them).
+    Raises `ValueError` on a non-blank line without a numeric page prefix.
+    """
     index: dict[int, list[str]] = {}
     with open(ocr_path, encoding="utf-8") as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, start=1):
             line = line.rstrip("\n")
+            if not line.strip():
+                continue
             page_str = line.partition(" ")[0]
             if not page_str.isdigit():
-                raise KeyError("Bad page number!!")
+                raise ValueError(
+                    f"{ocr_path}:{lineno}: line has no numeric page prefix: {line!r}"
+                )
             index.setdefault(int(page_str), []).append(line)
     logger.debug("indexed %s -> %d pages", ocr_path, len(index))
     return index

@@ -20,7 +20,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from src.common.errors import ValidationError
 from src.common.logger import log_errors
-from src.common.normalize import normalization
+from src.common.normalize import normalize
 from src.config import Settings, get_settings
 from src.models import DictionaryEntry
 
@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 
 @log_errors
 def validate(
-    raw_json: str, ocr_text: str, image_b64: str, page_number: int
+    raw_json: str,
+    ocr_text: str,
+    image_b64: str,
+    page_number: int,
+    settings: Settings | None = None,
 ) -> list[DictionaryEntry]:
     """Validate `{"entries": [...]}` against schema + OCR grounding.
 
@@ -42,6 +46,8 @@ def validate(
 
     Raises `ValidationError` on any parse, schema, or grounding failure.
     """
+    if settings is None:
+        settings = get_settings()
     logger.debug(
         "raw_json=%d chars ocr=%d chars image=%d b64 page=%d",
         len(raw_json),
@@ -64,11 +70,8 @@ def validate(
         )
     logger.debug("unwrapped %d entries", len(raw_entries))
 
-    normalized_ocr = normalization(ocr_text)
+    normalized_ocr = normalize(ocr_text)
     image_payload = base64.b64decode(image_b64)
-    s = get_settings()
-    tolerance = s.layout_tolerance
-    headword_delta = s.headword_delta
     entries: list[DictionaryEntry] = []
     for i, raw_entry in enumerate(raw_entries):
         try:
@@ -78,8 +81,8 @@ def validate(
                     "normalized_ocr": normalized_ocr,
                     "index": i,
                     "image_payload": image_payload,
-                    "headword_delta": headword_delta,
-                    "tolerance": tolerance,
+                    "headword_delta": settings.headword_delta,
+                    "tolerance": settings.layout_tolerance,
                 },
             )
         except PydanticValidationError as e:
@@ -88,11 +91,11 @@ def validate(
             ) from e
         entries.append(
             entry.model_copy(
-                update={"vs_vol": s.volume, "page_numbers": [page_number]}
+                update={"vs_vol": settings.volume, "page_numbers": [page_number]}
             )
         )
         logger.debug("entry %d schema + grounding ok (vs_vol=%d page=%d)",
-                     i, s.volume, page_number)
+                     i, settings.volume, page_number)
 
     logger.info("%d entries passed (page=%d)", len(entries), page_number)
     return entries

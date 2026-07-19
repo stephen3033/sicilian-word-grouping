@@ -76,6 +76,7 @@ class TestStitch:
         payload = json.loads(out_path.read_text(encoding="utf-8"))
         assert payload["volume"] == 1
         assert payload["model"] == "anthropic/claude-sonnet-4.6"
+        assert payload["pages"] == [1, 2]
         assert payload["page_count"] == 2
         assert payload["entry_count"] == 3
         # Page order preserved in the flat entries list.
@@ -86,6 +87,20 @@ class TestStitch:
         assert all(e["vs_vol"] == 1 for e in payload["entries"])
         assert all(e["page_numbers"] in ([1], [2]) for e in payload["entries"])
 
+    def test_pages_list_exposes_gaps_after_partial_run(self, tmp_path: Path):
+        # A fatal mid-run leaves gaps; the envelope records exactly which
+        # pages made it so resumption doesn't need to diff entries.
+        settings = Settings(output_dir=tmp_path)
+        entries_by_page = {
+            3: validate(_payload([_entry(headword="a³")]), _OCR,
+                        _HEADWORD_IMG_B64, page_number=3),
+            1: validate(_payload([_entry(headword="a¹", trailing_text="vocale")]),
+                        _OCR, _HEADWORD_IMG_B64, page_number=1),
+        }
+        out_path = stitch(entries_by_page, settings)
+        payload = json.loads(out_path.read_text(encoding="utf-8"))
+        assert payload["pages"] == [1, 3]
+
     def test_empty_pages_dict_writes_empty_entries_envelope(
         self, tmp_path: Path
     ):
@@ -95,6 +110,7 @@ class TestStitch:
         assert payload == {
             "volume": 1,
             "model": "anthropic/claude-sonnet-4.6",
+            "pages": [],
             "page_count": 0,
             "entry_count": 0,
             "entries": [],

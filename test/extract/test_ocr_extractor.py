@@ -63,8 +63,18 @@ class TestBuildIndex:
                 "2 another real page line",
             ],
         )
-        with pytest.raises(KeyError, match="Bad page number"):
+        with pytest.raises(ValueError, match=r":2: line has no numeric page prefix"):
             _build_index(str(ocr_txt), ocr_txt.stat().st_mtime)
+
+    def test_skips_blank_lines(self, ocr_txt: Path):
+        # VS volumes 2-5 contain thousands of blank lines between blocks.
+        _write_ocr_txt(
+            ocr_txt,
+            ["1 first line", "", "1 second line", "   ", "2 other page", ""],
+        )
+        index = _build_index(str(ocr_txt), ocr_txt.stat().st_mtime)
+        assert index[1] == ["1 first line", "1 second line"]
+        assert index[2] == ["2 other page"]
 
     def test_cache_invalidates_on_mtime_change(self, ocr_txt: Path):
         _write_ocr_txt(ocr_txt, ["1 original line"])

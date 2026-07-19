@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.common import cost as cost_module
+from src.common.errors import ValidationError
 from src.config import Settings
 from src.transform.client import _get_client, extract_json
 
@@ -82,6 +83,8 @@ class TestExtractJson:
 
         kwargs = inst.last_create_kwargs
         assert kwargs["model"] == s.model
+        # Cost is requested explicitly so OpenRouter includes usage.cost.
+        assert kwargs["extra_body"] == {"usage": {"include": True}}
         messages = kwargs["messages"]
         assert len(messages) == 2
 
@@ -95,6 +98,20 @@ class TestExtractJson:
             "image_url": {"url": "data:image/png;base64,b64abc"},
         }
         assert content[1] == {"type": "text", "text": _USER}
+
+    def test_empty_choices_raises_retryable_validation_error(self, monkeypatch):
+        class _NoChoicesFakeOpenAI(_FakeOpenAI):
+            def _create(self, **kwargs):
+                raw = super()._create(**kwargs)
+                raw._completion.choices = []
+                return raw
+
+        _patch(monkeypatch)
+        monkeypatch.setattr("src.transform.client.OpenAI", _NoChoicesFakeOpenAI)
+        _get_client.cache_clear()
+
+        with pytest.raises(ValidationError, match="no choices"):
+            extract_json("b64abc", _SYSTEM, _USER, page=3)
 
 
 class TestCostTracking:

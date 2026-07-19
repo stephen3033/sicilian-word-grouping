@@ -254,7 +254,7 @@ class TestValidateTrailingText:
             validate(_payload([entry_dict]), _OCR, _HEADWORD_IMG_B64, 1)
 
     def test_trailing_text_normalized_whitespace_match_passes(self):
-        # Raw `in` would miss the embedded newline; normalization() collapses
+        # Raw `in` would miss the embedded newline; normalize() collapses
         # whitespace runs so "vocale e prima" is found inside the OCR text.
         out = validate(
             _payload([_entry(headword="a¹", trailing_text="vocale\ne prima")]),
@@ -265,7 +265,7 @@ class TestValidateTrailingText:
         assert out[0].trailing_text == "vocale\ne prima"
 
     def test_trailing_text_normalized_unicode_match_passes(self):
-        # _OCR uses NFC "é"; trailing_text uses NFD "e\u0301"; normalization
+        # _OCR uses NFC "é"; trailing_text uses NFD "e\u0301"; normalize
         # NFC-composes both sides so the substring match succeeds.
         ocr = "a² art. femm. la. caff\xe9.\n"
         out = validate(

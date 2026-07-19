@@ -9,6 +9,7 @@ from typing import Any
 from openai import OpenAI
 
 from src.common.cost import record_call
+from src.common.errors import ValidationError
 from src.common.logger import log_errors
 from src.config import get_settings
 
@@ -79,6 +80,9 @@ def extract_json(
     raw = _get_client().chat.completions.with_raw_response.create(
         model=s.model,
         response_format={"type": "json_object"},
+        # Ask OpenRouter to include the billed cost in the response body
+        # (`usage.cost`); the cost headers are not sent on all plans.
+        extra_body={"usage": {"include": True}},
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -94,6 +98,11 @@ def extract_json(
         ],
     )
     response = raw.parse()
+    if not response.choices:
+        # Some providers return 200 with empty choices on upstream errors.
+        # Raise the retryable error type so the page retries instead of
+        # killing the whole run.
+        raise ValidationError(f"model returned no choices (page {page})")
     content = response.choices[0].message.content or ""
 
     if s.track_cost:

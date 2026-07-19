@@ -6,6 +6,7 @@ import argparse
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from src.common.errors import ValidationError
 from src.common.cost import log_summary
@@ -18,6 +19,13 @@ from src.transform import SYSTEM_PROMPT, build_user_prompt, extract_json
 from src.validate import persist_validated_page, validate
 
 logger = logging.getLogger(__name__)
+
+
+def _write_raw(out_path: Path, raw_json: str) -> None:
+    """Persist a raw_json artifact, creating parent dirs as needed."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(raw_json, encoding="utf-8")
+    logger.debug("wrote raw_json %s", out_path)
 
 
 @log_errors
@@ -44,15 +52,11 @@ def _transform_page(
 ) -> str:
     """Transform layer: compile prompt + call VLM, return raw JSON string.
 
-    Persistence rules for the raw_json artifact:
-    - ``attempt == 1`` in ``debug`` mode: write to ``raw_page_path`` (existing
-      behavior).
-    - ``attempt > 1`` (any mode): write to ``raw_retry_page_path`` so retry
-      artifacts are always on disk for prompt debugging.
-    - ``attempt == 1`` in ``running`` mode: not written here. If attempt 1
-      fails validation, the orchestrator writes the failed payload to
-      ``raw_page_path`` itself so prompt-failure artifacts survive even in
-      running mode.
+    Raw-JSON persistence rules:
+    - attempt 1, debug mode: written to ``raw_page_path`` here.
+    - attempt 1, running mode: written to ``raw_page_path`` by the
+      orchestrator only if validation fails, so failure artifacts survive.
+    - attempt > 1, any mode: always written to ``raw_retry_page_path``.
     """
     raw_json = extract_json(
         image_b64,
@@ -66,15 +70,11 @@ def _transform_page(
 
     if attempt == 1:
         if settings.mode == "debug":
-            out_path = settings.raw_page_path(page, settings.model)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(raw_json, encoding="utf-8")
-            logger.debug("wrote raw_json %s", out_path)
+            _write_raw(settings.raw_page_path(page, settings.model), raw_json)
     else:
-        out_path = settings.raw_retry_page_path(page, settings.model, attempt)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(raw_json, encoding="utf-8")
-        logger.debug("wrote retry raw_json %s", out_path)
+        _write_raw(
+            settings.raw_retry_page_path(page, settings.model, attempt), raw_json
+        )
     return raw_json
 
 
@@ -87,7 +87,7 @@ def _validate_page(
     settings: Settings,
 ) -> list[DictionaryEntry]:
     """Validate layer: schema + grounding + deterministic injection."""
-    entries = validate(raw_json, ocr_text, image_b64, page)
+    entries = validate(raw_json, ocr_text, image_b64, page, settings)
     if settings.mode == "debug":
         persist_validated_page(entries, page, settings)
     logger.info("ok (%d entries)", len(entries))
@@ -102,8 +102,9 @@ def _process_page_with_retries(
 
     Extraction (image + OCR) is performed once and cached across retries;
     only the transform (zero-shot VLM call) and validate layers re-run on
-    each retry. Only ``ValidationError`` triggers a retry — any other
-    exception propagates and kills the pipeline immediately.
+    each retry. Only ``ValidationError`` — from validation, or from the
+    transform layer (e.g. a response with no choices) — triggers a retry;
+    any other exception propagates and kills the pipeline immediately.
 
     Raises ``ValidationError`` if every attempt fails.
     """
@@ -113,19 +114,19 @@ def _process_page_with_retries(
 
     last_error: ValidationError | None = None
     for attempt in range(1, max_attempts + 1):
-        raw_json = _transform_page(image_b64, ocr_text, page, settings, attempt=attempt)
+        raw_json: str | None = None
         try:
+            raw_json = _transform_page(
+                image_b64, ocr_text, page, settings, attempt=attempt
+            )
             entries = _validate_page(raw_json, ocr_text, image_b64, page, settings)
         except ValidationError as e:
             last_error = e
             # In running mode, the first-attempt raw_json wasn't persisted by
             # _transform_page; preserve the failed payload here so prompt
             # failures are debuggable even outside debug mode.
-            if attempt == 1 and settings.mode != "debug":
-                out_path = settings.raw_page_path(page, settings.model)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(raw_json, encoding="utf-8")
-                logger.debug("wrote failed attempt-1 raw_json %s", out_path)
+            if raw_json is not None and attempt == 1 and settings.mode != "debug":
+                _write_raw(settings.raw_page_path(page, settings.model), raw_json)
             print(f"[page {page}] attempt {attempt}/{max_attempts} failed: {e}")
             logger.warning(
                 "page %d attempt %d/%d failed: %s",
