@@ -135,3 +135,28 @@ The pipeline records the **actual** OpenRouter cost of every LLM call and writes
 - **Parsing** — every request asks OpenRouter to include the billed cost in the response body (`usage: {include: true}`); cost is parsed from the `x-or-cost-*` headers first, falling back to the `usage.cost` body field. Unparseable calls count as `$0` and log a WARNING.
 - **Concurrency** — the accumulator (`src/common/cost.py`) is process-global and lock-protected, so the tally is correct under `--batch-size` parallelism.
 - **Opt-out** — set `VS_TRACK_COST=false` to disable tracking entirely.
+
+---
+
+## E2E Testing
+
+End-to-end pipeline runs against real VS volume 1 pages via OpenRouter.
+Each row is one model run; append new rows for new models. Runs use
+`op run --env-file=.env -- uv run sicilian-word-grouping --start 1 --end 5 --mode debug --batch-size 5`
+unless noted otherwise. Metrics are parsed from `logs/pipeline.log`.
+
+A "retry" is any transform/validate attempt beyond the first (`VS_MAX_ATTEMPTS=3`,
+so at most 2 retries per page). Cumulative retries is the sum across all pages.
+
+| Model | Pages | Mode | Batch Size | Total Execution Time | Total Cost | Total LLM Calls | Cumulative Retries | Retries Per Page | Failure Causes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `anthropic/claude-sonnet-4.6` | 1–5 | debug | 5 | 97s¹ | $0.812976 | 15 | 10 | page 1: 2; page 2: 2; page 3: 2; page 4: 2; page 5: 2 | • page 1, entry 1: variant `u²` not found in OCR text (attempts 1–3)<br>• page 2, entry 0: trailing_text not grounded in OCR (attempts 1–3)<br>• page 3, entry 3: headword `abbachiari²` not found in OCR text (attempts 1–3)<br>• page 4, entry 1: headword `abbaḍḍuliari²` not found in OCR text (attempts 1–3)<br>• page 5, entry 11: trailing_text not grounded in OCR (attempts 1–3) |
+
+¹ 97s from log timestamps (`pipeline start` → `COST SUMMARY`); wall-clock
+including `op run` + Python startup was 106.68s (`/usr/bin/time -p`).
+
+All 5 pages exhausted all 3 attempts (2 retries each) and failed fatally;
+0 entries were stitched (`VS/output/vs_1_anthropic-claude-sonnet-4.6.json`
+contains 0 entries). The model produced deterministic, identical (or
+near-identical) output across retries on each page, so the same grounding
+failure recurred on every attempt.
