@@ -52,6 +52,10 @@ class Settings(BaseSettings):
         "running",
         description="Pipeline execution mode: 'debug' persists per-page artifacts from both transform and validate layers; 'running' keeps validated entries in memory and only the load layer writes to disk.",
     )
+    max_attempts: int = Field(
+        3,
+        description="Maximum transform/validate retry attempts per page before the page fails and the pipeline aborts.",
+    )
 
     def pdf_path(self) -> Path:
         return self.data_dir / "columns" / f"VS{self.volume}-1col.pdf"
@@ -60,8 +64,16 @@ class Settings(BaseSettings):
         return self.data_dir / "OCR_cols" / f"VS{self.volume}-1col-googlevision.txt"
 
     def raw_page_path(self, page: int, model: str) -> Path:
-        """Transform-layer raw_json path (debug mode only)."""
+        """Transform-layer raw_json path (debug mode only / first attempt)."""
         return self.raw_output_dir / f"VS{self.volume}_page_{page:03d}_{sanitize_model(model)}.json"
+
+    def raw_retry_page_path(self, page: int, model: str, attempt: int) -> Path:
+        """Transform-layer raw_json path for a retry attempt (attempt >= 2).
+
+        Written to disk regardless of pipeline mode so prompt-failure
+        artifacts are always available for debugging.
+        """
+        return self.raw_output_dir / f"VS{self.volume}_page_{page:03d}_{sanitize_model(model)}_retry{attempt}.json"
 
     def validated_pages_dir(self) -> Path:
         """Per-page validated JSON directory (debug mode only)."""

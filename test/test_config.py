@@ -27,6 +27,11 @@ class TestSettingsPaths:
         p = s.raw_page_path(7, "anthropic/claude-sonnet-4.6")
         assert p == tmp_path / "raw" / "VS1_page_007_anthropic-claude-sonnet-4.6.json"
 
+    def test_raw_retry_page_path_appends_attempt_suffix(self, tmp_path: Path):
+        s = Settings(raw_output_dir=tmp_path / "raw", output_dir=tmp_path / "out")
+        p = s.raw_retry_page_path(7, "anthropic/claude-sonnet-4.6", 2)
+        assert p == tmp_path / "raw" / "VS1_page_007_anthropic-claude-sonnet-4.6_retry2.json"
+
     def test_validated_pages_dir_nests_under_output_dir(self, tmp_path: Path):
         s = Settings(output_dir=tmp_path)
         assert s.validated_pages_dir() == tmp_path / "vol_1" / "pages"
@@ -48,3 +53,11 @@ class TestSettingsPaths:
     def test_mode_accepts_debug(self):
         s = Settings(mode="debug")
         assert s.mode == "debug"
+
+    def test_max_attempts_default_is_three(self):
+        s = Settings()
+        assert s.max_attempts == 3
+
+    def test_max_attempts_is_overridable(self):
+        s = Settings(max_attempts=5)
+        assert s.max_attempts == 5

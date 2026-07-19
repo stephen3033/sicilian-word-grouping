@@ -32,7 +32,7 @@ SYSTEM_PROMPT = textwrap.dedent("""\
     3. NO WRAPPERS: Output your extraction directly as a raw JSON string. Do not include markdown code block formatting (```json) or conversational text.
 """)
 
-_DEFAULT_PREAMBLE = textwrap.dedent("""\
+DEFAULT_USER_PREAMBLE = textwrap.dedent("""\
     Return a root JSON object containing an array of entry blocks under the "entries" key. Use the OCR text for literal characters and the image for typography/layout boundaries.
 
     ### TYPOGRAPHIC MAPPING RULES:
@@ -48,13 +48,6 @@ _DEFAULT_PREAMBLE = textwrap.dedent("""\
     ### INJECTION CONTEXT:
 """)
 
-_USER_PREAMBLES: dict[str, str] = {
-    "anthropic/claude-sonnet-4.6": _DEFAULT_PREAMBLE,
-    "google/gemini-3.5-flash": _DEFAULT_PREAMBLE,
-    "openai/gpt-5.4": _DEFAULT_PREAMBLE,
-    "moonshotai/kimi-k2.7-code": _DEFAULT_PREAMBLE,
-}
-
 _USER_TEMPLATE = textwrap.dedent("""\
     {preamble}
 
@@ -65,35 +58,19 @@ _USER_TEMPLATE = textwrap.dedent("""\
     {page_text}""")
 
 
-def _preamble_for(model: str) -> str:
-    """Return the user-prompt preamble for a model id; fall back to default."""
-    match model:
-        case "anthropic/claude-sonnet-4.6":
-            return _USER_PREAMBLES["anthropic/claude-sonnet-4.6"]
-        case "google/gemini-3.5-flash":
-            return _USER_PREAMBLES["google/gemini-3.5-flash"]
-        case "openai/gpt-5.4":
-            return _USER_PREAMBLES["openai/gpt-5.4"]
-        case "moonshotai/kimi-k2.7-code":
-            return _USER_PREAMBLES["moonshotai/kimi-k2.7-code"]
-        case _:  # unregistered models fall back to the default preamble
-            return _DEFAULT_PREAMBLE
-
-
 @log_errors
 def build_user_prompt(page_text: str) -> str:
-    """Compile the model-specific preamble + DictionaryEntry schema + OCR text."""
+    """Compile the shared user-prompt preamble + DictionaryEntry schema + OCR text."""
     s = get_settings()
-    preamble = _preamble_for(s.model)
     prompt = _USER_TEMPLATE.format(
-        preamble=preamble,
+        preamble=DEFAULT_USER_PREAMBLE,
         schema_json=json.dumps(DictionaryEntry.model_json_schema(), indent=2),
         page_text=page_text,
     )
     logger.debug(
         "model=%s preamble=%d chars prompt=%d chars ocr=%d chars",
         s.model,
-        len(preamble),
+        len(DEFAULT_USER_PREAMBLE),
         len(prompt),
         len(page_text),
     )

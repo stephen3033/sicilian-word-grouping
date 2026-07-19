@@ -6,21 +6,12 @@ import pytest
 
 from src.config import Settings
 from src.models import DictionaryEntry
-from src.transform.prompter import _DEFAULT_PREAMBLE, _USER_PREAMBLES, build_user_prompt
-
-_DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
+from src.transform.prompter import DEFAULT_USER_PREAMBLE, build_user_prompt
 
 
 @pytest.fixture(autouse=True)
 def _default_model(monkeypatch):
     s = Settings()
-    s.model = _DEFAULT_MODEL
-    monkeypatch.setattr("src.transform.prompter.get_settings", lambda: s)
-
-
-def _set_model(monkeypatch, model: str) -> None:
-    s = Settings()
-    s.model = model
     monkeypatch.setattr("src.transform.prompter.get_settings", lambda: s)
 
 
@@ -40,23 +31,20 @@ class TestBuildUserPrompt:
         out = build_user_prompt("some ocr text")
         assert out.index("json_schema:") < out.index("ocr_page_text:")
 
-    def test_unknown_model_falls_back_to_default(self, monkeypatch):
-        _set_model(monkeypatch, "some/unknown-model")
-        assert _DEFAULT_PREAMBLE in build_user_prompt("text")
-
-    @pytest.mark.parametrize(
-        "model",
-        [
-            "anthropic/claude-sonnet-4.6",
-            "google/gemini-3.5-flash",
-            "openai/gpt-5.4",
-            "moonshotai/kimi-k2.7-code",
-        ],
-    )
-    def test_known_model_preamble_present(self, monkeypatch, model):
-        _set_model(monkeypatch, model)
-        assert _USER_PREAMBLES[model] in build_user_prompt("text")
+    def test_default_preamble_present(self):
+        assert DEFAULT_USER_PREAMBLE in build_user_prompt("text")
 
     def test_preamble_precedes_schema(self):
         out = build_user_prompt("text")
-        assert out.index(_USER_PREAMBLES[_DEFAULT_MODEL]) < out.index("json_schema:")
+        assert out.index(DEFAULT_USER_PREAMBLE) < out.index("json_schema:")
+
+    def test_preamble_same_regardless_of_model(self, monkeypatch):
+        s1 = Settings()
+        s1.model = "anthropic/claude-sonnet-4.6"
+        s2 = Settings()
+        s2.model = "some/other-model"
+        monkeypatch.setattr("src.transform.prompter.get_settings", lambda: s1)
+        p1 = build_user_prompt("text")
+        monkeypatch.setattr("src.transform.prompter.get_settings", lambda: s2)
+        p2 = build_user_prompt("text")
+        assert p1 == p2
