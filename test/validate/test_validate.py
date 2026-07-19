@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 
 import pytest
+from PIL import Image, ImageDraw
 
 from src.common.errors import ValidationError
 from src.models import DictionaryEntry
@@ -14,6 +17,38 @@ _OCR = (
     "1 a¹ f. e (antiq.) m. vocale e prima lettera dell'alfabeto.\n"
     "a² art. femm. la. V. anche la¹. Cfr. u2.\n"
     "a³ pron. femm. la. Anche la². Cfr. u³.\n"
+)
+
+
+def _png_b64(line_specs: list[tuple[int, int, int, int]]) -> str:
+    """Build a white PNG with black-rectangle 'text lines' and return b64.
+
+    line_specs: list of (left, top, width, height) in pixels. Two lines at
+    different X produces a headword-layout image (|Δx|>tol -> expected
+    is_orphan_fragment=False); two lines at the same X produces an
+    orphan-layout image (|Δx|<=tol -> expected is_orphan_fragment=True).
+    """
+    img = Image.new("RGB", (1000, 800), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for left, top, width, height in line_specs:
+        draw.rectangle(
+            [left, top, left + width - 1, top + height - 1], fill=(0, 0, 0)
+        )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+# Headword-layout image: line1 at x=100, line2 at x=160 -> |Δx|=60 > 20.
+# The layout validator expects is_orphan_fragment=False for index 0.
+_HEADWORD_IMG_B64 = _png_b64(
+    [(100, 50, 600, 40), (160, 120, 600, 40)]
+)
+
+# Orphan-layout image: line1 and line2 both at x=100 -> |Δx|=0 <= 20.
+# The layout validator expects is_orphan_fragment=True for index 0.
+_ORPHAN_IMG_B64 = _png_b64(
+    [(100, 50, 600, 40), (100, 120, 600, 40)]
 )
 
 
@@ -34,7 +69,7 @@ class TestValidateSuccess:
                 }
             ]
         )
-        out = validate(raw, _OCR)
+        out = validate(raw, _OCR, _HEADWORD_IMG_B64)
         assert len(out) == 1
         assert isinstance(out[0], DictionaryEntry)
         assert out[0].headword == "a²"
@@ -52,7 +87,7 @@ class TestValidateSuccess:
                 }
             ]
         )
-        out = validate(raw, _OCR)
+        out = validate(raw, _OCR, _ORPHAN_IMG_B64)
         assert len(out) == 1
         assert out[0].headword is None
         assert out[0].variants is None
@@ -69,7 +104,7 @@ class TestValidateSuccess:
                 }
             ]
         )
-        out = validate(raw, _OCR)
+        out = validate(raw, _OCR, _HEADWORD_IMG_B64)
         assert out[0].variants == []
 
     def test_multiple_entries_all_valid(self):
@@ -98,7 +133,7 @@ class TestValidateSuccess:
                 },
             ]
         )
-        out = validate(raw, _OCR)
+        out = validate(raw, _OCR, _HEADWORD_IMG_B64)
         assert len(out) == 3
         assert [e.headword for e in out] == ["a¹", "a²", "a³"]
 
@@ -106,15 +141,15 @@ class TestValidateSuccess:
 class TestValidateParseFailures:
     def test_malformed_json_raises(self):
         with pytest.raises(ValidationError, match="not valid JSON"):
-            validate("{not json", _OCR)
+            validate("{not json", _OCR, _HEADWORD_IMG_B64)
 
     def test_missing_entries_key_raises(self):
         with pytest.raises(ValidationError, match="missing top-level 'entries'"):
-            validate(json.dumps({"words": []}), _OCR)
+            validate(json.dumps({"words": []}), _OCR, _HEADWORD_IMG_B64)
 
     def test_entries_not_a_list_raises(self):
         with pytest.raises(ValidationError, match="'entries' is not a list"):
-            validate(json.dumps({"entries": {"headword": "a²"}}), _OCR)
+            validate(json.dumps({"entries": {"headword": "a²"}}), _OCR, _HEADWORD_IMG_B64)
 
 
 class TestValidateSchemaConformance:
@@ -130,7 +165,7 @@ class TestValidateSchemaConformance:
             ]
         )
         with pytest.raises(ValidationError, match="schema conformance"):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
     def test_entry_wrong_type_raises(self):
         raw = _payload(
@@ -145,7 +180,7 @@ class TestValidateSchemaConformance:
             ]
         )
         with pytest.raises(ValidationError, match="schema conformance"):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
     def test_schema_failure_skips_grounding_check(self):
         # headword 'a²' is valid against OCR, but page_numbers is missing so
@@ -161,7 +196,7 @@ class TestValidateSchemaConformance:
             ]
         )
         with pytest.raises(ValidationError, match="schema conformance"):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
 
 class TestValidateGrounding:
@@ -178,7 +213,7 @@ class TestValidateGrounding:
             ]
         )
         with pytest.raises(ValidationError, match="headword 'xyzzy' not found"):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
     def test_variant_not_in_ocr_raises(self):
         raw = _payload(
@@ -193,7 +228,7 @@ class TestValidateGrounding:
             ]
         )
         with pytest.raises(ValidationError, match="variant 'nope' not found"):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
     def test_headword_grounding_check_happens_before_variants(self):
         raw = _payload(
@@ -208,7 +243,7 @@ class TestValidateGrounding:
             ]
         )
         with pytest.raises(ValidationError, match="headword 'xyzzy' not found"):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
     def test_entries_checked_in_order_second_fails(self):
         raw = _payload(
@@ -230,7 +265,7 @@ class TestValidateGrounding:
             ]
         )
         with pytest.raises(ValidationError, match="entry 1 headword 'xyzzy'"):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
 
 class TestValidateTrailingText:
@@ -257,7 +292,7 @@ class TestValidateTrailingText:
                 }
             ]
         )
-        out = validate(raw, _OCR)
+        out = validate(raw, _OCR, _HEADWORD_IMG_B64)
         assert out[0].trailing_text == "art. femm. la."
 
     def test_trailing_text_not_in_ocr_raises(self):
@@ -275,9 +310,9 @@ class TestValidateTrailingText:
         with pytest.raises(
             ValidationError, match=r"entry 0 trailing_text 'xyzzy' not found"
         ):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
-    def test_none_trailing_text_skips_check(self):
+    def test_none_trailing_text_fails_schema(self):
         raw = _payload(
             [
                 {
@@ -289,8 +324,22 @@ class TestValidateTrailingText:
                 }
             ]
         )
-        out = validate(raw, _OCR)
-        assert out[0].trailing_text is None
+        with pytest.raises(ValidationError, match=r"schema conformance"):
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
+
+    def test_missing_trailing_text_fails_schema(self):
+        raw = _payload(
+            [
+                {
+                    "headword": "a²",
+                    "variants": None,
+                    "page_numbers": [1],
+                    "is_orphan_fragment": False,
+                }
+            ]
+        )
+        with pytest.raises(ValidationError, match=r"schema conformance"):
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
     def test_trailing_text_normalized_whitespace_match_passes(self):
         # Raw `in` would miss because of the embedded newline; after
@@ -307,7 +356,7 @@ class TestValidateTrailingText:
                 }
             ]
         )
-        out = validate(raw, _OCR)
+        out = validate(raw, _OCR, _HEADWORD_IMG_B64)
         assert out[0].trailing_text == "vocale\ne prima"
 
     def test_trailing_text_normalized_unicode_match_passes(self):
@@ -326,7 +375,7 @@ class TestValidateTrailingText:
                 }
             ]
         )
-        out = validate(raw, ocr)
+        out = validate(raw, ocr, _HEADWORD_IMG_B64)
         assert out[0].trailing_text == "art. femm. la. caffe\u0301."
 
     def test_headword_check_runs_before_trailing_text(self):
@@ -347,7 +396,7 @@ class TestValidateTrailingText:
         with pytest.raises(
             ValidationError, match=r"entry 0 headword 'xyzzy' not found"
         ):
-            validate(raw, _OCR)
+            validate(raw, _OCR, _HEADWORD_IMG_B64)
 
 
 class TestValidateGroundingContext:
@@ -400,11 +449,11 @@ class TestValidateGroundingContext:
         with pytest.raises(
             ValidationError, match=r"normalized_ocr context required"
         ):
-            validate(raw, "")
+            validate(raw, "", _HEADWORD_IMG_B64)
 
     def test_validate_with_whitespace_only_ocr_raises(self):
         raw = _payload([self._ENTRY])
         with pytest.raises(
             ValidationError, match=r"normalized_ocr context required"
         ):
-            validate(raw, "   ")
+            validate(raw, "   ", _HEADWORD_IMG_B64)

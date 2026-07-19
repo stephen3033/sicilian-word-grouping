@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     strip_ocr_prefix: bool = True
     output_dir: Path = Path("test/data/transform/output")
     log_file: Path = Path("logs/pipeline.log")
+    layout_tolerance: float = Field(
+        20.0,
+        description=(
+            "Pixel tolerance for the layout-verification heuristic on "
+            "`is_orphan_fragment`. The validator compares the left X of the "
+            "first two text lines on the rendered page; |Δx| > tolerance => "
+            "headword present (is_orphan_fragment=False). Validated at 200 "
+            "DPI against VS1 pp 1-973 (orphan max |Δx|=14, headword min "
+            "|Δx|=36). Override via VS_LAYOUT_TOLERANCE for other volumes."
+        ),
+    )
 
     def pdf_path(self) -> Path:
         return self.data_dir / "columns" / f"VS{self.volume}-1col.pdf"

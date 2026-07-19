@@ -43,10 +43,10 @@ def _transform_page(image_b64: str, ocr_text: str, settings: Settings) -> str:
 
 @log_errors
 def _validate_page(
-    raw_json: str, ocr_text: str, settings: Settings
+    raw_json: str, ocr_text: str, image_b64: str, settings: Settings
 ) -> list[DictionaryEntry]:
-    """Validate layer: schema + grounding checks; raises on failure."""
-    entries = validate(raw_json, ocr_text)
+    """Validate layer: schema + grounding + layout checks; raises on failure."""
+    entries = validate(raw_json, ocr_text, image_b64)
     logger.info("validate: ok (%d entries)", len(entries))
     return entries
 
@@ -63,7 +63,7 @@ def _process_page(page: int, settings: Settings) -> None:
     out_path.write_text(raw_json, encoding="utf-8")
     logger.debug("process_page: wrote %s", out_path)
 
-    _validate_page(raw_json, ocr_text, settings)
+    _validate_page(raw_json, ocr_text, image_b64, settings)
     logger.info("page %d: complete", page)
 
 
