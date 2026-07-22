@@ -29,6 +29,8 @@ def _get_client() -> OpenAI:
     return OpenAI(
         base_url=s.openai_base_url,
         api_key=s.openai_api_key.get_secret_value(),
+        max_retries=0,
+        timeout=s.request_timeout_seconds,
     )
 
 
@@ -77,12 +79,15 @@ def extract_json(
     by ``src.common.cost``.
     """
     s = get_settings()
+    extra_body: dict[str, Any] = {"usage": {"include": True}}
+    if s.reasoning_effort is not None:
+        extra_body["reasoning"] = {"effort": s.reasoning_effort}
     raw = _get_client().chat.completions.with_raw_response.create(
         model=s.model,
         response_format={"type": "json_object"},
         # Ask OpenRouter to include the billed cost in the response body
         # (`usage.cost`); the cost headers are not sent on all plans.
-        extra_body={"usage": {"include": True}},
+        extra_body=extra_body,
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -100,8 +105,7 @@ def extract_json(
     response = raw.parse()
     if not response.choices:
         # Some providers return 200 with empty choices on upstream errors.
-        # Raise the retryable error type so the page retries instead of
-        # killing the whole run.
+        # This is a page-level provider failure; the pipeline never retries.
         raise ValidationError(f"model returned no choices (page {page})")
     content = response.choices[0].message.content or ""
 

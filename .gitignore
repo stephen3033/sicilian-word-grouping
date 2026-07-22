@@ -3,8 +3,12 @@
 VS/
 .venv/
 .env
+.prompts/
 __pycache__/
 test/data/**
+
+src/character_ocr/
+test/character_ocr/
 
 AGENTS.md
 

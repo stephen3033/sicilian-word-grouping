@@ -1,162 +1,154 @@
 # sicilian-word-grouping
 
-Extract and group headwords from all variants of Sicilian dialect using the [Vocabolario Siciliano](https://it.wikipedia.org/wiki/Vocabolario_Siciliano) PDF volumes and OpenAI-compatible vision-language models (Ollama, OpenRouter, etc.).
+Extract structured dictionary entries from the *Vocabolario Siciliano* PDF
+volumes with an OpenAI-compatible vision model.
 
-## Architecture Overview
+## How it works
 
-The system is split into four isolated, data-driven layers:
+`PDF image + OCR → model extraction → validation → JSON`
 
-1. **Extract (E):** Renders a printed page of the active VS volume to a Base64 PNG (compositing its two physical PDF pages) and reads the matching OCR text block from a pre-rendered txt file.
-2. **Transform (T):** Compiles a single prompt (preamble + `DictionaryEntry` JSON schema + OCR text) and sends it with the page image to an OpenAI-compatible VLM; returns raw JSON. `src/main.py` orchestrates a configurable `--start`/`--end` printed-page range, running E -> T per page (persisting raw JSON in debug mode, or on first-attempt validation failure in running mode).
-3. **Validate (V):** Unwraps `{"entries": [...]}`, checks Pydantic schema conformance, grounds `headword`/`variants`/`trailing_text` against the OCR text, and applies a pixel-based first-entry layout heuristic — all without a golden dataset.
-4. **Load (L):** Stitches validated per-page entries into a single volume JSON with a metadata envelope (`volume`, `model`, `pages`, `page_count`, `entry_count`).
+For each unfinished printed page, the pipeline:
 
----
+1. Combines its two physical PDF pages and loads the matching OCR text.
+2. Makes one model request for the page.
+3. Validates the response and marks entries that need review.
+4. Immediately adds the complete page to the final volume JSON.
 
-## Extract Layer
+Pages can run concurrently with `--batch-size`. A failed page does not stop
+other pages, and partial pages are never saved.
 
-The two extractors share a common addressing scheme: the integer argument is the **printed page number** of the active volume (selected by `VS_VOLUME`). VS single-column PDFs split each printed page into two physical PDF pages (left column, then right column), so one printed page = two PDF pages. `extract_page_image` renders both and composites them; `extract_page_text` returns the matching block from the OCR txt (one line per OCR'd line, prefixed `<n> <text>`).
+## Cost and model choice
 
-- **Image composition** (`VS_COLUMN_LAYOUT`): `vertical` (default) stacks the left column above the right so a VLM's top-down scan matches reading order; `horizontal` restores side-by-side for A/B testing.
-- **OCR indexing** (`extract_page_text`): builds a `{printed_page: [lines]}` index from the txt once (mtime-keyed cache), strips the `<n> ` prefix when `VS_STRIP_OCR_PREFIX` is true.
+**Qwen 3.6 is the model of choice.** Set
+`MODEL=qwen/qwen3.6-35b-a3b`. Its output is good enough for this project at a
+much lower price than Sonnet 4.6, although it runs substantially slower.
 
----
+### Initial estimates
 
-## Transform Layer
+These are observed estimates, not fixed prices. Cost varies with model output
+and provider pricing.
 
-- **Prompt compilation** (`src/transform/prompter.py`): `build_user_prompt` concatenates the single model-agnostic `DEFAULT_USER_PREAMBLE`, the `DictionaryEntry` JSON schema, and the OCR page text via `_USER_TEMPLATE`. `SYSTEM_PROMPT` frames the call as a non-conversational extraction engine.
-- **Vision client** (`src/transform/client.py`): `extract_json` sends system + image + user prompts to the OpenAI-compatible chat endpoint with `response_format={"type": "json_object"}` (hard rail, no markdown wrappers). `page` is keyword-only so per-call cost is attributed to the right page. Default `MODEL` is `anthropic/claude-sonnet-4.6`; any OpenRouter-compatible model id works.
-- **Persistence**: attempt-1 raw JSON written only in debug mode; retry-attempt raw JSON always written (`_retry<N>.json`); first-attempt raw JSON preserved on validation failure even in running mode.
+| Model | Estimated cost/page | Observation |
+| --- | ---: | --- |
+| **Qwen 3.6** | **$0.02252** | **Recommended value; slower than Sonnet 4.6.** |
+| Gemini Pro 3.1 | $0.12700 | — |
+| Gemini Flash 3.5 | $0.02710 | Good cost/performance range. |
+| Claude Fable 5 | $0.28450 | — |
+| Claude Sonnet 5 | $0.06750 | — |
+| Claude Sonnet 4.6 | $0.04755 | Good cost/performance range. |
+| GPT 5.5 | $0.19900 | Returned one-line JSON. |
+| GPT 5.4 | $0.03510 | Good cost/performance range; returned one-line JSON. |
+| GPT 5.4 Mini | $0.00900 | Did not reliably follow the schema. |
+| Kimi K2.6 | $0.06200 | First-page extraction hit rate limits. |
+| Kimi K2.7 Code | $0.04965 | Missed variants and altered trailing text. |
 
----
+The most promising observed range was about **$0.01–$0.05 per page**.
+OpenRouter's actual per-call cost and final total are written to the pipeline
+log. Set `VS_TRACK_COST=false` to disable tracking.
 
-## Validate Layer
+### Pages 1–5 E2E comparison
 
-- **Schema** (`src/validate/validate.py`): unwraps `{"entries": [...]}` and validates each entry via Pydantic `model_validator(mode="after")`.
-- **Grounding** (`src/common/normalize.py`): NFC + whitespace-normalized substring match against OCR text for `headword`, `variants`, `trailing_text`.
-- **Layout heuristic**: on the first entry only, compares the pixel-bbox left-X of the first two real text lines; `|Δx| > headword_delta - tolerance` ⇒ headword expected present, otherwise `None` (orphan).
-- **Injection**: `vs_vol` and `page_numbers` (overriding the model's `0` / `[0]` placeholders) are set in the same per-entry pass.
-- **Persistence** (`persist_validated_page`): writes per-page validated JSON (debug mode only).
+| Model run | Pages | Entries | Runtime | Cost | Calls | Retries | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| **Qwen 3.6, July 22** | 5/5 | 119 | 164s | $0.112596 | 8 | 3 | All pages persisted; acceptable value result. |
+| Claude Sonnet 4.6, July 19 | 5/5 | 122 | 102s | $0.395841 | 7 | 2 | Complete pass. |
 
----
-
-## Load Layer
-
-- **`stitch`** (`src/load/load.py`): the only layer that always writes to disk (both modes). Emits `vs_<vol>_<model>.json` with a metadata envelope (`volume`, `model`, `pages`, `page_count`, `entry_count`) and a flat `entries` list in page order. The `pages` list records exactly which printed pages were stitched, so partial output after a fatal run is self-describing.
-- **`read_pages_from_disk`**: standalone re-run entry point for debug-mode resumability; reads per-page JSON previously written by `persist_validated_page` and bypasses re-validation via `model_construct` (grounding OCR isn't available at load time).
-
----
+Qwen cost about **72% less** in this comparison but took about **61% longer**
+and omitted three entries found by Sonnet. These dated runs used an earlier
+retrying runner; the current pipeline makes one request per page.
 
 ## Usage
 
+`.env` supplies `OPENAI_API_KEY`; the examples resolve it through 1Password.
+Choose exactly one page selector:
+
+| Selector | Example |
+| --- | --- |
+| Inclusive range | `--start 1 --end 20` |
+| Page list | `--pages 3 7 9` |
+| One page per file line | `--pages-file pages.txt` |
+
 ```bash
-op run --env-file=.env -- uv run sicilian-word-grouping --start <n> --end <m> [--mode debug|running] [--batch-size <n>]
+op run --env-file=.env -- uv run sicilian-word-grouping \
+  --start 1 --end 20 --batch-size 5
 ```
 
-### Flags
+`--batch-size` sets the maximum concurrent pages and defaults to `1`.
+`--mode debug` also saves raw responses and annotated per-page JSON.
 
-- `--start` / `--end` — first and last printed page (inclusive).
-- `--mode` — `debug` persists per-page artifacts from transform and validate; `running` keeps validated entries in memory (load still writes). Overrides `VS_MODE`.
-- `--batch-size` — parallelize the T→V loop across this many pages at once. Sequential if omitted. Must be ≤ total pages in range.
+Requested pages are deduplicated and sorted. Pages already in the final JSON
+are skipped without making a model request.
 
-### Secrets
+## Output and failures
 
-`.env` holds only `OPENAI_API_KEY=op://...` and is resolved by 1Password at launch via `op run --env-file=.env -- ...`. `Settings` (`src/config.py`) never reads `.env`; it reads the resolved values from the process environment. See `.env.template` (`OPENAI_API_KEY=sk-...`).
+| Output | Location |
+| --- | --- |
+| Final dictionary | `VS/output/vs_<volume>_<model>.json` |
+| Failed-page list | `VS/output/vol_<volume>/failures.txt` |
+| Debug page JSON | `VS/output/vol_<volume>/pages/` |
+| Raw responses | `test/data/transform/output/` |
 
-### Environment Variables
+Successful pages are saved immediately. Failed pages are recorded as sorted,
+unique page numbers, and the process exits with status `1` after all requested
+work finishes.
 
-| Variable | Default | Notes |
+Rerun volume 1 failures with:
+
+```bash
+op run --env-file=.env -- uv run sicilian-word-grouping \
+  --pages-file VS/output/vol_1/failures.txt --batch-size 5
+```
+
+A later success removes the page from `failures.txt`. Existing pre-v2 final
+JSON is preserved with a `.legacy.json` suffix.
+
+## Entries and review
+
+Each entry contains the model-extracted `headword`, `variants`, and
+`trailing_text`, plus its volume, page numbers, review status, and review
+reason.
+
+| Status | Meaning |
+| --- | --- |
+| `passed` | No quality findings. |
+| `machine` | One text finding that may be machine-correctable. |
+| `human` | Multiple text findings or a page-layout concern. |
+
+Review findings do not change or discard extracted text. Malformed JSON, an
+invalid response schema, missing OCR, provider errors, and timeouts fail the
+whole page.
+
+## Configuration
+
+Defaults live in `src/config.py`. Common settings are:
+
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | — | Required. Resolved by 1Password. |
+| `OPENAI_API_KEY` | — | API key. |
 | `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible endpoint. |
-| `MODEL` | `anthropic/claude-sonnet-4.6` | Any OpenRouter-compatible model id. |
-| `VS_VOLUME` | `1` | Active VS volume number. |
-| `VS_DATA_DIR` | `VS` | Root for PDF (`columns/`) and OCR (`OCR_cols/`). |
-| `VS_DPI` | `200` | PDF render resolution. |
-| `VS_COLUMN_LAYOUT` | `vertical` | `vertical` or `horizontal`. |
-| `VS_STRIP_OCR_PREFIX` | `true` | Strip `<n> ` line prefix from OCR txt. |
-| `VS_MODE` | `running` | `debug` or `running`. |
-| `VS_MAX_ATTEMPTS` | `3` | T→V retries per page before fatal. |
-| `VS_TRACK_COST` | `true` | Track per-call OpenRouter cost. |
-| `VS_HEADWORD_DELTA` | `36.0` | Calibrated min \|Δx\| px for layout heuristic. |
-| `VS_LAYOUT_TOLERANCE` | `15.0` | Px subtracted from `headword_delta`. |
-| `VS_RAW_OUTPUT_DIR` | `test/data/transform/output` | Transform raw JSON output. |
-| `VS_OUTPUT_DIR` | `VS/output` | Load stitched JSON + validate per-page JSON. |
-| `VS_LOG_FILE` | `logs/pipeline.log` | Single logfile; no stdout handlers. |
+| `MODEL` | `anthropic/claude-sonnet-4.6` | Model identifier; override with Qwen 3.6 as recommended above. |
+| `VS_VOLUME` | `1` | Active dictionary volume. |
+| `VS_DATA_DIR` | `VS` | PDF and OCR source root. |
+| `VS_OUTPUT_DIR` | `VS/output` | Final and per-page outputs. |
+| `VS_MODE` | `running` | `running` or `debug`. |
+| `VS_REQUEST_TIMEOUT_SECONDS` | `120` | Request timeout. |
+| `VS_TRACK_COST` | `true` | Track OpenRouter costs. |
+| `VS_LOG_FILE` | `logs/pipeline.log` | Pipeline logfile. |
 
-### Retry & Fatal Behavior
+Rendering, OCR, grounding, and layout thresholds can also be adjusted through
+the `VS_*` settings in `src/config.py`.
 
-`VS_MAX_ATTEMPTS`-bounded T→V retries per page, triggered by validation failures or a provider response with no choices; any other exception is immediately fatal. First fatal page stops the run; partial progress still stitched to disk. Exit code is non-zero on any fatal failure.
+## Logs and tests
 
----
+Pipeline logs go only to `VS_LOG_FILE`, keeping console output concise. View
+the default log with:
 
-## Testing
+```bash
+cat logs/pipeline.log
+```
 
-Run the unit suite (no network or API key required; the OpenAI client is faked):
+Run the test suite with:
 
 ```bash
 uv run pytest
 ```
-
----
-
-## Cost
-
-### Projection
-
-Gemini Pro 3.1 - $0.127/page
-
-Gemini Flash 3.5 - $0.0271/page
-
-Claude Fable 5 - $0.2845/page
-
-Claude Sonnet 5 - $0.0675/page
-
-Claude Sonnet 4.6 - $0.04755/page
-
-GPT 5.5 - $0.199/page (extracts 1 line json)
-
-GPT 5.4 - $0.0351/page (extracts 1 line json)
-
-GPT 5.4 Mini - $0.009/page (extracts 1 line json, did not follow instructions and conform to schema, not a usable json output)
-
-Kimi K2.6 - $0.062/page (failed at extracting the first page due to rate limits, extracts 1 line json)
-
-Kimi K2.7 Code - $0.04965/page (did not get v. variants, extracts 1 line json, removed POS from trailing text)
-
-**NOTE:** The ideal cost to performance seems to be between $0.01-$0.05, Gemini 3.5 Flash, Claude Sonnet 4.6, GPT 5.4, and Kimi K2.7 Code
-
-### Runtime Tracking
-
-The pipeline records the **actual** OpenRouter cost of every LLM call and writes the tally to `logs/pipeline.log`.
-
-- **Per call** — `extract_json` (`src/transform/client.py`) logs `page N cost=$... (page_running=$... total=$... calls=...)` at INFO level (failed retry attempts are billed and counted).
-- **Final total** — a `COST SUMMARY total=$... across N LLM calls (M pages)` line is emitted from a `finally` block in `src.main.main`, so it lands in the logfile on success, fatal page failure, stitch failure, or `sys.exit(1)`.
-- **Parsing** — every request asks OpenRouter to include the billed cost in the response body (`usage: {include: true}`); cost is parsed from the `x-or-cost-*` headers first, falling back to the `usage.cost` body field. Unparseable calls count as `$0` and log a WARNING.
-- **Concurrency** — the accumulator (`src/common/cost.py`) is process-global and lock-protected, so the tally is correct under `--batch-size` parallelism.
-- **Opt-out** — set `VS_TRACK_COST=false` to disable tracking entirely.
-
----
-
-## E2E Testing
-
-End-to-end pipeline runs against real VS volume 1 pages via OpenRouter.
-Each row is one model run; append new rows for new models. Runs use
-`op run --env-file=.env -- uv run sicilian-word-grouping --start 1 --end 5 --mode debug --batch-size 5`
-unless noted otherwise. Metrics are parsed from `logs/pipeline.log`.
-
-A "retry" is any transform/validate attempt beyond the first (`VS_MAX_ATTEMPTS=3`,
-so at most 2 retries per page). Cumulative retries is the sum across all pages.
-
-| Model | Pages | Mode | Batch Size | Total Execution Time | Total Cost | Total LLM Calls | Cumulative Retries | Retries Per Page | Failure Causes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `anthropic/claude-sonnet-4.6` | 1–5 | debug | 5 | 97s¹ | $0.812976 | 15 | 10 | page 1: 2; page 2: 2; page 3: 2; page 4: 2; page 5: 2 | • page 1, entry 1: variant `u²` not found in OCR text (attempts 1–3)<br>• page 2, entry 0: trailing_text not grounded in OCR (attempts 1–3)<br>• page 3, entry 3: headword `abbachiari²` not found in OCR text (attempts 1–3)<br>• page 4, entry 1: headword `abbaḍḍuliari²` not found in OCR text (attempts 1–3)<br>• page 5, entry 11: trailing_text not grounded in OCR (attempts 1–3) |
-
-¹ 97s from log timestamps (`pipeline start` → `COST SUMMARY`); wall-clock
-including `op run` + Python startup was 106.68s (`/usr/bin/time -p`).
-
-All 5 pages exhausted all 3 attempts (2 retries each) and failed fatally;
-0 entries were stitched (`VS/output/vs_1_anthropic-claude-sonnet-4.6.json`
-contains 0 entries). The model produced deterministic, identical (or
-near-identical) output across retries on each page, so the same grounding
-failure recurred on every attempt.

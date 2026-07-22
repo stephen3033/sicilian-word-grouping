@@ -1,3 +1,3 @@
-from src.load.load import read_pages_from_disk, stitch
+from src.load.load import PersistenceCoordinator, SCHEMA_VERSION
 
-__all__ = ["stitch", "read_pages_from_disk"]
+__all__ = ["PersistenceCoordinator", "SCHEMA_VERSION"]

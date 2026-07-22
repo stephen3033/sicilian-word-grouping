@@ -13,7 +13,7 @@ from src.extract.pdf_extractor import _composite, _render_page, extract_page_ima
 
 VS1_DATA_DIR = Path("VS")
 VS1_PDF = VS1_DATA_DIR / "columns" / "VS1-1col.pdf"
-GOLDEN_PAGES = [1, 500, 973]
+GOLDEN_PAGES = [1, 2, 3, 500, 973]
 OUTPUT_DIR = Path("test/data/extract/output")
 
 vs1_available = VS1_PDF.exists()

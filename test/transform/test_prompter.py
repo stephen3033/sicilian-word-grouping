@@ -5,46 +5,46 @@ import json
 import pytest
 
 from src.config import Settings
-from src.models import DictionaryEntry
+from src.models import LLMEntry
 from src.transform.prompter import DEFAULT_USER_PREAMBLE, build_user_prompt
 
 
 @pytest.fixture(autouse=True)
 def _default_model(monkeypatch):
-    s = Settings()
-    monkeypatch.setattr("src.transform.prompter.get_settings", lambda: s)
+    monkeypatch.setattr("src.transform.prompter.get_settings", lambda: Settings())
 
 
-class TestBuildUserPrompt:
-    def test_schema_block_is_valid_jsonschema_for_dictionary_entry(self):
-        out = build_user_prompt("ignored")
-        schema_block = out.split("json_schema:\n", 1)[1].split(
-            "\n\nocr_page_text:", 1
-        )[0]
-        assert json.loads(schema_block) == DictionaryEntry.model_json_schema()
+def test_prompt_uses_only_llm_entry_schema():
+    prompt = build_user_prompt("ignored")
+    schema_block = prompt.split("json_schema:\n", 1)[1].split(
+        "\n\nocr_page_text:", 1
+    )[0]
+    schema = json.loads(schema_block)
+    assert schema == LLMEntry.model_json_schema()
+    assert set(schema["properties"]) == {"headword", "trailing_text", "variants"}
+    assert "page_numbers" not in prompt
+    assert "vs_vol" not in prompt
+    assert "is_review_needed" not in prompt
+    assert "review_reason" not in prompt
 
-    def test_page_text_present_verbatim_at_end(self):
-        page_text = "line one\nline two with weird chars: \xe0\xe8\xec"
-        assert build_user_prompt(page_text).endswith(page_text)
 
-    def test_schema_precedes_ocr_text(self):
-        out = build_user_prompt("some ocr text")
-        assert out.index("json_schema:") < out.index("ocr_page_text:")
+def test_page_text_is_verbatim_at_end_after_schema():
+    page_text = "line one\nline two with weird chars: àèì"
+    prompt = build_user_prompt(page_text)
+    assert prompt.endswith(page_text)
+    assert prompt.index("json_schema:") < prompt.index("ocr_page_text:")
 
-    def test_default_preamble_present(self):
-        assert DEFAULT_USER_PREAMBLE in build_user_prompt("text")
 
-    def test_preamble_precedes_schema(self):
-        out = build_user_prompt("text")
-        assert out.index(DEFAULT_USER_PREAMBLE) < out.index("json_schema:")
+def test_model_agnostic_quality_preamble_is_retained():
+    prompt = build_user_prompt("text")
+    assert DEFAULT_USER_PREAMBLE in prompt
+    assert "### HEADWORD AND VARIANT CHARACTER FIDELITY:" in prompt
+    assert "### MANDATORY PRE-OUTPUT AUDIT:" in prompt
+    assert "Never summarize, shorten, paraphrase, or omit body content" in prompt
 
-    def test_preamble_same_regardless_of_model(self, monkeypatch):
-        s1 = Settings()
-        s1.model = "anthropic/claude-sonnet-4.6"
-        s2 = Settings()
-        s2.model = "some/other-model"
-        monkeypatch.setattr("src.transform.prompter.get_settings", lambda: s1)
-        p1 = build_user_prompt("text")
-        monkeypatch.setattr("src.transform.prompter.get_settings", lambda: s2)
-        p2 = build_user_prompt("text")
-        assert p1 == p2
+
+def test_no_retry_reminder_or_retry_api_remains():
+    prompt = build_user_prompt("text")
+    assert "RETRY QUALITY PASS" not in prompt
+    with pytest.raises(TypeError):
+        build_user_prompt("text", retry=True)

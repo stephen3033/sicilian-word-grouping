@@ -11,7 +11,7 @@ from src.extract.ocr_extractor import _build_index, extract_page_text
 VS1_DATA_DIR = Path("VS")
 VS1_PDF = VS1_DATA_DIR / "columns" / "VS1-1col.pdf"
 VS1_OCR = VS1_DATA_DIR / "OCR_cols" / "VS1-1col-googlevision.txt"
-GOLDEN_PAGES = [1, 500, 973]
+GOLDEN_PAGES = [1, 2, 3, 500, 973]
 EXPECTED_DIR = Path("test/data/extract/expected")
 OUTPUT_DIR = Path("test/data/extract/output")
 
@@ -34,7 +34,7 @@ def _patch_settings(monkeypatch, data_dir: Path, **overrides) -> None:
 
 @pytest.fixture
 def ocr_txt(tmp_path: Path) -> Path:
-    return tmp_path / "OCR_cols" / "VS1-1col-googlevision.txt"
+    return tmp_path / "sanitized_ocr" / "VS1-1col-googlevision.txt"
 
 
 class TestBuildIndex:
@@ -140,3 +140,71 @@ def test_ocr_page_matches_expected(page: int):
         f"add it manually with the prefix-stripped text for VS1 page {page}"
     )
     assert actual == expected_path.read_text(encoding="utf-8")
+
+
+SANITIZED_VS1 = VS1_DATA_DIR / "sanitized_ocr" / "VS1-1col-googlevision.txt"
+sanitized_available = SANITIZED_VS1.exists()
+
+
+@pytest.mark.skipif(not sanitized_available, reason="sanitized VS1 OCR not available")
+class TestSanitizationApplied:
+    """Smoke tests that the one-shot OCR sanitization is in place.
+
+    `VS/sanitized_ocr/sanitize.py` splits OCR lines at embedded
+    page-break markers so continuation text on page N+1 is attributed
+    to N+1 (not N). Guards against `config.py` being re-pointed at
+    unsanitized `OCR_cols/`.
+    """
+
+    def test_page_685_contains_chiuviri_continuation(self, monkeypatch):
+        """Page 685 must contain the chiòviri continuation + variants.
+
+        Unsanitized, the whole `chiòviri` entry (incl. continuation
+        physically on page 685) was attributed to page 684.
+        """
+        _patch_settings(monkeypatch, VS1_DATA_DIR)
+        text = extract_page_text(685)
+        assert "visazzi piovere a catinelle" in text, (
+            "page 685 OCR missing chiòviri continuation — sanitization "
+            "not applied or config pointing at unsanitized OCR_cols/"
+        )
+        assert "chiuòviri" in text
+        assert "ciòviri" in text
+
+    def test_page_442_contains_bbramu_continuation(self, monkeypatch):
+        """Page 442 must contain the bbramu continuation + variants.
+
+        Unsanitized, the `D442 76) grido acuto. ... V. anche abbramu,
+        bbrama² e bbrammu.` text on page 442 was attributed to page 441.
+        """
+        _patch_settings(monkeypatch, VS1_DATA_DIR)
+        text = extract_page_text(442)
+        assert "76) grido acuto" in text, (
+            "page 442 OCR missing bbramu continuation — sanitization "
+            "not applied or config pointing at unsanitized OCR_cols/"
+        )
+        assert "abbramu" in text
+        assert "bbrama²" in text
+        assert "bbrammu" in text
+
+    def test_no_embedded_page_markers_remain(self):
+        """Sanitized VS1 OCR must have zero remaining `page+1` markers."""
+        import re
+        pattern = re.compile(
+            r"(?<=[a-zA-ZàèéìòùḍÀÈÉÌÒÙḌ])(\d{1,3}) "
+        )
+        remaining = 0
+        for line in SANITIZED_VS1.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            prefix = line.partition(" ")[0]
+            if not prefix.isdigit():
+                continue
+            page = int(prefix)
+            for match in pattern.finditer(line):
+                if int(match.group(1)) == page + 1:
+                    remaining += 1
+        assert remaining == 0, (
+            f"sanitized VS1 OCR has {remaining} remaining page+1 markers "
+            f"— re-run VS/sanitized_ocr/sanitize.py"
+        )

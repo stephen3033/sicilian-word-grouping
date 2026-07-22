@@ -1,485 +1,253 @@
-"""Unit tests for src.main (orchestrator).
-
-Covers retry orchestration, fatal-failure handling, and the per-page
-E -> T -> V flow. Tests monkeypatch the per-layer helpers
-(``_extract_page``, ``_transform_page``, ``_validate_page``) and
-``stitch`` so the orchestrator is exercised without touching the
-network, filesystem, or PDF.
-"""
+"""Single-pass orchestration, selectors, and work-conserving concurrency."""
 
 from __future__ import annotations
 
+import argparse
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from src.common.errors import ValidationError
 from src.config import Settings
-from src.main import _process_page_with_retries, main
-from src.models import DictionaryEntry
+from src.load import PersistenceCoordinator
+from src.main import (
+    _build_parser,
+    _process_page,
+    _resolve_pages,
+    _run_pages,
+    main,
+)
+from src.models import DictionaryEntry, ReviewStatus
 
 
-def _entry(headword: str = "a²") -> DictionaryEntry:
-    return DictionaryEntry.model_construct(
-        headword=headword,
-        trailing_text="art. femm. la.",
-        variants=None,
-        page_numbers=[1],
-        vs_vol=1,
-    )
-
-
-class _Recorder:
-    """Tracks per-layer calls for assertions."""
-
-    def __init__(self) -> None:
-        self.extract_calls: list[int] = []
-        self.transform_calls: list[tuple[int, int]] = []  # (page, attempt)
-        self.validate_calls: list[tuple[int, int]] = []  # (page, attempt)
-        self.validate_results: dict[int, list[DictionaryEntry]] = {}
-        self.transform_payloads: dict[int, list[str]] = {}
-
-
-def _make_transform_payload(attempt: int) -> str:
-    return f'{{"entries": [{{"headword": "attempt{attempt}"}}]}}'
-
-
-def _patch_layers(monkeypatch, recorder: _Recorder, settings: Settings):
-    """Replace src.main per-layer helpers with recorder-aware stubs."""
-
-    def _fake_extract(page, settings):
-        recorder.extract_calls.append(page)
-        return ("img-b64", "ocr-text")
-
-    def _fake_transform(image_b64, ocr_text, page, settings, attempt=1):
-        recorder.transform_calls.append((page, attempt))
-        payload = _make_transform_payload(attempt)
-        recorder.transform_payloads.setdefault(page, []).append(payload)
-        # Mirror the real persistence rules so tests can assert on-disk artifacts.
-        if attempt == 1:
-            if settings.mode == "debug":
-                out = settings.raw_page_path(page, settings.model)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(payload, encoding="utf-8")
-        else:
-            out = settings.raw_retry_page_path(page, settings.model, attempt)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(payload, encoding="utf-8")
-        return payload
-
-    def _make_validate(fail_attempts: set[int]):
-        def _fake_validate(raw_json, ocr_text, image_b64, page, settings):
-            attempt = len(recorder.validate_calls) + 1
-            recorder.validate_calls.append((page, attempt))
-            if attempt in fail_attempts:
-                raise ValidationError(f"attempt {attempt} bad")
-            return [_entry()]
-        return _fake_validate
-
-    return _fake_extract, _fake_transform, _make_validate
-
-
-def _settings(tmp_path: Path, mode: str = "running") -> Settings:
+def _settings(tmp_path: Path, *, mode: str = "running") -> Settings:
     return Settings(
         mode=mode,
-        raw_output_dir=tmp_path / "raw",
         output_dir=tmp_path / "out",
+        raw_output_dir=tmp_path / "raw",
         log_file=tmp_path / "pipeline.log",
+        track_cost=False,
     )
 
 
-class TestProcessPageSuccess:
-    def test_first_attempt_success_calls_each_layer_once(
-        self, monkeypatch, tmp_path
-    ):
-        s = _settings(tmp_path)
-        rec = _Recorder()
-        ext, tr, mk_val = _patch_layers(monkeypatch, rec, s)
-        monkeypatch.setattr("src.main._extract_page", ext)
-        monkeypatch.setattr("src.main._transform_page", tr)
-        monkeypatch.setattr("src.main._validate_page", mk_val(set()))
-
-        out = _process_page_with_retries(5, s)
-
-        assert rec.extract_calls == [5]
-        assert rec.transform_calls == [(5, 1)]
-        assert rec.validate_calls == [(5, 1)]
-        assert len(out) == 1
-        # No retry files written in running mode on first-attempt success.
-        assert not s.raw_page_path(5, s.model).exists()
-        assert not s.raw_retry_page_path(5, s.model, 2).exists()
+def _entry(page: int) -> DictionaryEntry:
+    return DictionaryEntry(
+        headword=f"page-{page}",
+        trailing_text="body",
+        variants=None,
+        page_numbers=[page],
+        vs_vol=1,
+        is_review_needed=ReviewStatus.PASSED,
+        review_reason="",
+    )
 
 
-class TestProcessPageRetries:
-    def test_second_attempt_success_writes_both_artifacts_in_running_mode(
-        self, monkeypatch, tmp_path
-    ):
-        s = _settings(tmp_path, mode="running")
-        rec = _Recorder()
-        ext, tr, mk_val = _patch_layers(monkeypatch, rec, s)
-        monkeypatch.setattr("src.main._extract_page", ext)
-        monkeypatch.setattr("src.main._transform_page", tr)
-        # First attempt fails validation, second succeeds.
-        monkeypatch.setattr("src.main._validate_page", mk_val({1}))
-
-        out = _process_page_with_retries(5, s)
-
-        assert rec.extract_calls == [5]  # extracted once even across retries
-        assert rec.transform_calls == [(5, 1), (5, 2)]
-        assert rec.validate_calls == [(5, 1), (5, 2)]
-        assert len(out) == 1
-        # Attempt 1 failed in running mode -> orchestrator persisted raw_page_path.
-        assert s.raw_page_path(5, s.model).exists()
-        assert (
-            s.raw_page_path(5, s.model).read_text(encoding="utf-8")
-            == _make_transform_payload(1)
-        )
-        # Attempt 2 (retry) -> _transform_page persisted retry path.
-        assert s.raw_retry_page_path(5, s.model, 2).exists()
-        assert (
-            s.raw_retry_page_path(5, s.model, 2).read_text(encoding="utf-8")
-            == _make_transform_payload(2)
-        )
-
-    def test_third_attempt_success_writes_retry2_and_retry3(
-        self, monkeypatch, tmp_path
-    ):
-        s = _settings(tmp_path, mode="running")
-        rec = _Recorder()
-        ext, tr, mk_val = _patch_layers(monkeypatch, rec, s)
-        monkeypatch.setattr("src.main._extract_page", ext)
-        monkeypatch.setattr("src.main._transform_page", tr)
-        monkeypatch.setattr("src.main._validate_page", mk_val({1, 2}))
-
-        out = _process_page_with_retries(7, s)
-
-        assert rec.transform_calls == [(7, 1), (7, 2), (7, 3)]
-        assert rec.validate_calls == [(7, 1), (7, 2), (7, 3)]
-        assert len(out) == 1
-        assert s.raw_page_path(7, s.model).exists()
-        assert s.raw_retry_page_path(7, s.model, 2).exists()
-        assert s.raw_retry_page_path(7, s.model, 3).exists()
-
-    def test_all_attempts_fail_raises_validation_error(
-        self, monkeypatch, tmp_path
-    ):
-        s = _settings(tmp_path, mode="running")
-        rec = _Recorder()
-        ext, tr, mk_val = _patch_layers(monkeypatch, rec, s)
-        monkeypatch.setattr("src.main._extract_page", ext)
-        monkeypatch.setattr("src.main._transform_page", tr)
-        monkeypatch.setattr("src.main._validate_page", mk_val({1, 2, 3}))
-
-        with pytest.raises(ValidationError, match="failed after 3 attempts"):
-            _process_page_with_retries(5, s)
-
-        assert rec.transform_calls == [(5, 1), (5, 2), (5, 3)]
-        assert rec.validate_calls == [(5, 1), (5, 2), (5, 3)]
-        # All three attempt artifacts on disk.
-        assert s.raw_page_path(5, s.model).exists()
-        assert s.raw_retry_page_path(5, s.model, 2).exists()
-        assert s.raw_retry_page_path(5, s.model, 3).exists()
-
-    def test_non_validation_error_in_transform_is_not_retried(
-        self, monkeypatch, tmp_path
-    ):
-        s = _settings(tmp_path)
-        rec = _Recorder()
-
-        def _boom(image, ocr, page, settings, attempt=1):
-            rec.transform_calls.append((page, attempt))
-            raise RuntimeError("network down")
-
-        monkeypatch.setattr("src.main._extract_page",
-                            _patch_layers(monkeypatch, rec, s)[0])
-        monkeypatch.setattr("src.main._transform_page", _boom)
-
-        with pytest.raises(RuntimeError, match="network down"):
-            _process_page_with_retries(5, s)
-
-        # Only one transform call; no retry on non-ValidationError.
-        assert rec.transform_calls == [(5, 1)]
-
-    def test_validation_error_in_transform_is_retried(
-        self, monkeypatch, tmp_path
-    ):
-        # e.g. the client's empty-choices guard: a transient provider glitch
-        # raises ValidationError from the transform layer and must retry.
-        s = _settings(tmp_path)
-        rec = _Recorder()
-        ext, tr, mk_val = _patch_layers(monkeypatch, rec, s)
-
-        def _flaky_transform(image, ocr, page, settings, attempt=1):
-            if attempt == 1:
-                rec.transform_calls.append((page, attempt))
-                raise ValidationError("model returned no choices")
-            return tr(image, ocr, page, settings, attempt=attempt)
-
-        monkeypatch.setattr("src.main._extract_page", ext)
-        monkeypatch.setattr("src.main._transform_page", _flaky_transform)
-        monkeypatch.setattr("src.main._validate_page", mk_val(set()))
-
-        out = _process_page_with_retries(5, s)
-
-        assert rec.transform_calls == [(5, 1), (5, 2)]
-        assert len(out) == 1
-        # No raw_json existed for the failed attempt, so nothing was persisted
-        # to raw_page_path.
-        assert not s.raw_page_path(5, s.model).exists()
+def _parse(argv: list[str]) -> tuple[argparse.Namespace, argparse.ArgumentParser]:
+    parser = _build_parser()
+    return parser.parse_args(argv), parser
 
 
-class TestCostSummaryGuarantee:
-    """The COST SUMMARY line must emit from main()'s finally block
-    whether the pipeline succeeds, a page fails fatally, or stitch raises."""
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--start", "3", "--end", "5"], [3, 4, 5]),
+        (["--pages", "9", "3", "9", "7"], [3, 7, 9]),
+    ],
+)
+def test_range_and_inline_selectors_are_sorted_and_deduplicated(argv, expected):
+    args, parser = _parse(argv)
+    assert _resolve_pages(args, parser) == expected
 
-    def _patch_pipeline(self, monkeypatch, tmp_path, process_page_fn, *, stitch_raises=False):
-        s = _settings(tmp_path, mode="running")
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries", process_page_fn)
 
-        if stitch_raises:
-            def _boom_stitch(entries_by_page, settings=None):
-                raise RuntimeError("stitch blew up")
-            monkeypatch.setattr("src.main.stitch", _boom_stitch)
-        else:
-            monkeypatch.setattr(
-                "src.main.stitch",
-                lambda entries_by_page, settings=None: tmp_path / "stitched.json",
-            )
+def test_pages_file_selector_reads_one_page_per_line(tmp_path):
+    page_file = tmp_path / "pages.txt"
+    page_file.write_text("9\n3\n\n7\n3\n", encoding="utf-8")
+    args, parser = _parse(["--pages-file", str(page_file)])
+    assert _resolve_pages(args, parser) == [3, 7, 9]
 
-        calls: list[int] = []
 
-        def _spy_log_summary():
-            calls.append(1)
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--start", "3"],
+        ["--pages", "3", "--end", "4"],
+        ["--start", "3", "--end", "4", "--pages", "7"],
+    ],
+)
+def test_page_selectors_are_mutually_exclusive_and_complete(argv):
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        args = parser.parse_args(argv)
+        _resolve_pages(args, parser)
+    assert exc_info.value.code == 2
 
-        monkeypatch.setattr("src.main.log_summary", _spy_log_summary)
-        return s, calls
 
-    def test_summary_emitted_on_success(self, monkeypatch, tmp_path):
-        _, calls = self._patch_pipeline(
-            monkeypatch,
-            tmp_path,
-            lambda page, settings: [_entry(headword=f"p{page}")],
-        )
-        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
+def test_process_page_calls_each_layer_once_and_persists_immediately(
+    monkeypatch, tmp_path
+):
+    settings = _settings(tmp_path)
+    persistence = PersistenceCoordinator(settings)
+    calls: list[str] = []
 
+    def extract(page, active_settings):
+        calls.append("extract")
+        return "image", "ocr"
+
+    def transform(image, ocr, page, active_settings):
+        calls.append("transform")
+        return '{"entries": []}'
+
+    def validate_page(raw, ocr, image, page, active_settings):
+        calls.append("validate")
+        return [_entry(page)]
+
+    monkeypatch.setattr("src.main._extract_page", extract)
+    monkeypatch.setattr("src.main._transform_page", transform)
+    monkeypatch.setattr("src.main._validate_page", validate_page)
+
+    result = _process_page(5, settings, persistence)
+    assert calls == ["extract", "transform", "validate"]
+    assert result == [_entry(5)]
+    assert persistence.page_exists(5)
+
+
+def test_failed_page_is_recorded_once_without_retry(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    persistence = PersistenceCoordinator(settings)
+    calls = 0
+
+    monkeypatch.setattr("src.main._extract_page", lambda page, settings: ("img", "ocr"))
+
+    def timeout(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr("src.main._transform_page", timeout)
+    with pytest.raises(TimeoutError, match="timed out"):
+        _process_page(2, settings, persistence)
+    assert calls == 1
+    assert persistence.read_failures() == {2}
+    assert not persistence.page_exists(2)
+
+
+def test_schema_failure_preserves_raw_response_and_excludes_page(
+    monkeypatch, tmp_path
+):
+    settings = _settings(tmp_path)
+    persistence = PersistenceCoordinator(settings)
+    raw = "{malformed"
+    monkeypatch.setattr("src.main._extract_page", lambda page, settings: ("img", "ocr"))
+    monkeypatch.setattr("src.main._transform_page", lambda *args: raw)
+    monkeypatch.setattr(
+        "src.main._validate_page",
+        lambda *args: (_ for _ in ()).throw(ValidationError("invalid envelope")),
+    )
+
+    with pytest.raises(ValidationError, match="invalid envelope"):
+        _process_page(4, settings, persistence)
+    assert settings.raw_page_path(4, settings.model).read_text() == raw
+    assert persistence.read_failures() == {4}
+    assert not persistence.dictionary_path.exists()
+
+
+def test_fast_worker_persists_while_another_request_is_blocked(
+    monkeypatch, tmp_path
+):
+    settings = _settings(tmp_path)
+    persistence = PersistenceCoordinator(settings)
+    blocked = threading.Event()
+    release = threading.Event()
+    fast_done = threading.Event()
+    result: list[object] = []
+
+    def fake_process(page, active_settings, active_persistence):
+        if page == 1:
+            blocked.set()
+            assert release.wait(timeout=5)
+        active_persistence.insert_page(page, [_entry(page)])
+        if page == 2:
+            fast_done.set()
+        return [_entry(page)]
+
+    monkeypatch.setattr("src.main._process_page", fake_process)
+
+    runner = threading.Thread(
+        target=lambda: result.append(_run_pages([1, 2], 2, settings, persistence))
+    )
+    runner.start()
+    assert blocked.wait(timeout=2)
+    assert fast_done.wait(timeout=2)
+    assert persistence.page_exists(2)
+    assert not persistence.page_exists(1)
+    release.set()
+    runner.join(timeout=5)
+    assert result == [({1, 2}, {})]
+
+
+def test_timeout_does_not_cancel_other_pages(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    persistence = PersistenceCoordinator(settings)
+
+    def fake_process(page, active_settings, active_persistence):
+        if page == 2:
+            active_persistence.add_failure(page)
+            raise TimeoutError("provider timeout")
+        active_persistence.insert_page(page, [_entry(page)])
+        return [_entry(page)]
+
+    monkeypatch.setattr("src.main._process_page", fake_process)
+    succeeded, failed = _run_pages([1, 2, 3, 4], 2, settings, persistence)
+    assert succeeded == {1, 3, 4}
+    assert set(failed) == {2}
+    assert persistence.completed_pages() == {1, 3, 4}
+    assert persistence.read_failures() == {2}
+
+
+def test_main_skips_completed_pages_before_worker_submission(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    persistence = PersistenceCoordinator(settings)
+    persistence.insert_page(3, [_entry(3)])
+    submitted: list[int] = []
+
+    monkeypatch.setattr("src.main.get_settings", lambda: settings)
+
+    def fake_run(pages, batch_size, active_settings, active_persistence):
+        submitted.extend(pages)
+        return set(pages), {}
+
+    monkeypatch.setattr("src.main._run_pages", fake_run)
+    monkeypatch.setattr(sys, "argv", ["prog", "--pages", "7", "3", "7"])
+    main()
+    assert submitted == [7]
+
+
+def test_main_exits_nonzero_after_all_requested_work_on_partial_failure(
+    monkeypatch, tmp_path
+):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr("src.main.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "src.main._run_pages",
+        lambda pages, batch, active_settings, persistence: (
+            {1, 3},
+            {2: TimeoutError("timeout")},
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
+    with pytest.raises(SystemExit) as exc_info:
         main()
+    assert exc_info.value.code == 1
 
-        assert calls == [1]
 
-    def test_summary_emitted_on_fatal_page_failure(self, monkeypatch, tmp_path):
-        def _fake(page, settings):
-            if page == 2:
-                raise ValidationError("page 2 unrecoverable")
-            return [_entry(headword=f"p{page}")]
-
-        _, calls = self._patch_pipeline(monkeypatch, tmp_path, _fake)
-        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
-
-        with pytest.raises(SystemExit) as excinfo:
-            main()
-        assert excinfo.value.code == 1
-        # The finally block ran log_summary *before* SystemExit propagated.
-        assert calls == [1]
-
-    def test_summary_emitted_when_stitch_raises(self, monkeypatch, tmp_path):
-        _, calls = self._patch_pipeline(
-            monkeypatch,
-            tmp_path,
-            lambda page, settings: [_entry(headword=f"p{page}")],
-            stitch_raises=True,
-        )
-        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "2"])
-
-        with pytest.raises(RuntimeError, match="stitch blew up"):
-            main()
-        assert calls == [1]
-
-    def test_summary_skipped_when_track_cost_false(self, monkeypatch, tmp_path):
-        s, calls = self._patch_pipeline(
-            monkeypatch,
-            tmp_path,
-            lambda page, settings: [_entry(headword=f"p{page}")],
-        )
-        s.track_cost = False
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
-
+def test_batch_size_must_be_positive(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--pages", "1", "--batch-size", "0"],
+    )
+    with pytest.raises(SystemExit) as exc_info:
         main()
-
-        assert calls == []
-
-
-class TestMainFlow:
-    def test_fatal_page_stops_loop_and_stitches_succeeded_pages(
-        self, monkeypatch, tmp_path
-    ):
-        s = _settings(tmp_path, mode="running")
-        stitched_arg: dict = {}
-
-        def _fake_process_page(page, settings):
-            if page == 2:
-                raise ValidationError("page 2 unrecoverable")
-            return [_entry(headword=f"p{page}")]
-
-        def _fake_stitch(entries_by_page, settings=None):
-            stitched_arg["pages"] = sorted(entries_by_page)
-            stitched_arg["entries_by_page"] = entries_by_page
-            return tmp_path / "stitched.json"
-
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries", _fake_process_page)
-        monkeypatch.setattr("src.main.stitch", _fake_stitch)
-
-        argv = ["prog", "--start", "1", "--end", "3"]
-        monkeypatch.setattr(sys, "argv", argv)
-
-        with pytest.raises(SystemExit) as excinfo:
-            main()
-
-        assert excinfo.value.code == 1
-        # Only page 1 succeeded before fatal page 2 stopped the loop.
-        assert stitched_arg["pages"] == [1]
-        assert stitched_arg["entries_by_page"][1][0].headword == "p1"
-
-    def test_all_pages_succeed_exits_zero(self, monkeypatch, tmp_path):
-        s = _settings(tmp_path, mode="running")
-        stitched_arg: dict = {}
-
-        def _fake_process_page(page, settings):
-            return [_entry(headword=f"p{page}")]
-
-        def _fake_stitch(entries_by_page, settings=None):
-            stitched_arg["pages"] = sorted(entries_by_page)
-            return tmp_path / "stitched.json"
-
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries", _fake_process_page)
-        monkeypatch.setattr("src.main.stitch", _fake_stitch)
-        monkeypatch.setattr(sys, "argv", ["prog", "--start", "1", "--end", "3"])
-
-        main()  # should not raise SystemExit
-        assert stitched_arg["pages"] == [1, 2, 3]
-
-
-class TestMainParallelFlow:
-    """Tests for the --batch-size parallel path in src.main.main."""
-
-    def test_batch_size_exceeds_page_count_errors(self, monkeypatch, tmp_path):
-        s = _settings(tmp_path, mode="running")
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries",
-                            lambda page, settings: [_entry()])
-        monkeypatch.setattr("src.main.stitch",
-                            lambda entries_by_page, settings=None: tmp_path / "x.json")
-        monkeypatch.setattr(sys, "argv",
-                            ["prog", "--start", "1", "--end", "3", "--batch-size", "10"])
-
-        with pytest.raises(SystemExit) as excinfo:
-            main()
-        # argparse.parser.error exits with status 2.
-        assert excinfo.value.code == 2
-
-    def test_batch_size_zero_errors(self, monkeypatch, tmp_path):
-        s = _settings(tmp_path, mode="running")
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries",
-                            lambda page, settings: [_entry()])
-        monkeypatch.setattr("src.main.stitch",
-                            lambda entries_by_page, settings=None: tmp_path / "x.json")
-        monkeypatch.setattr(sys, "argv",
-                            ["prog", "--start", "1", "--end", "3", "--batch-size", "0"])
-
-        with pytest.raises(SystemExit) as excinfo:
-            main()
-        assert excinfo.value.code == 2
-
-    def test_batch_size_negative_errors(self, monkeypatch, tmp_path):
-        s = _settings(tmp_path, mode="running")
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries",
-                            lambda page, settings: [_entry()])
-        monkeypatch.setattr("src.main.stitch",
-                            lambda entries_by_page, settings=None: tmp_path / "x.json")
-        monkeypatch.setattr(sys, "argv",
-                            ["prog", "--start", "1", "--end", "3",
-                             "--batch-size", "-1"])
-
-        with pytest.raises(SystemExit) as excinfo:
-            main()
-        assert excinfo.value.code == 2
-
-    def test_batch_size_equals_page_count_ok(self, monkeypatch, tmp_path):
-        s = _settings(tmp_path, mode="running")
-        stitched_arg: dict = {}
-
-        def _fake_process_page(page, settings):
-            return [_entry(headword=f"p{page}")]
-
-        def _fake_stitch(entries_by_page, settings=None):
-            stitched_arg["pages"] = sorted(entries_by_page)
-            return tmp_path / "stitched.json"
-
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries", _fake_process_page)
-        monkeypatch.setattr("src.main.stitch", _fake_stitch)
-        monkeypatch.setattr(sys, "argv",
-                            ["prog", "--start", "1", "--end", "3",
-                             "--batch-size", "3"])
-
-        main()  # no SystemExit
-        assert stitched_arg["pages"] == [1, 2, 3]
-
-    def test_all_pages_succeed_in_parallel(self, monkeypatch, tmp_path):
-        s = _settings(tmp_path, mode="running")
-        stitched_arg: dict = {}
-
-        def _fake_process_page(page, settings):
-            return [_entry(headword=f"p{page}")]
-
-        def _fake_stitch(entries_by_page, settings=None):
-            stitched_arg["pages"] = sorted(entries_by_page)
-            return tmp_path / "stitched.json"
-
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries", _fake_process_page)
-        monkeypatch.setattr("src.main.stitch", _fake_stitch)
-        monkeypatch.setattr(sys, "argv",
-                            ["prog", "--start", "1", "--end", "4",
-                             "--batch-size", "2"])
-
-        main()
-        assert stitched_arg["pages"] == [1, 2, 3, 4]
-
-    def test_fatal_page_completes_in_flight_then_stitches_and_exits_nonzero(
-        self, monkeypatch, tmp_path
-    ):
-        s = _settings(tmp_path, mode="running")
-        stitched_arg: dict = {}
-
-        def _fake_process_page(page, settings):
-            if page == 2:
-                raise ValidationError("page 2 unrecoverable")
-            return [_entry(headword=f"p{page}")]
-
-        def _fake_stitch(entries_by_page, settings=None):
-            stitched_arg["pages"] = sorted(entries_by_page)
-            stitched_arg["entries_by_page"] = entries_by_page
-            return tmp_path / "stitched.json"
-
-        monkeypatch.setattr("src.main.get_settings", lambda: s)
-        monkeypatch.setattr("src.main._process_page_with_retries", _fake_process_page)
-        monkeypatch.setattr("src.main.stitch", _fake_stitch)
-        monkeypatch.setattr(sys, "argv",
-                            ["prog", "--start", "1", "--end", "4",
-                             "--batch-size", "2"])
-
-        with pytest.raises(SystemExit) as excinfo:
-            main()
-        assert excinfo.value.code == 1
-        # Page 2 itself failed; at least one non-fatal page should have
-        # been collected (page 1 ran concurrently). Pages 3/4 may or may
-        # not have started depending on scheduling.
-        assert 2 not in stitched_arg["pages"]
-        assert 1 in stitched_arg["pages"]
+    assert exc_info.value.code == 2

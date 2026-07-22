@@ -79,6 +79,8 @@ class TestExtractJson:
         assert inst.kwargs == {
             "base_url": s.openai_base_url,
             "api_key": "test-key",
+            "max_retries": 0,
+            "timeout": 120.0,
         }
 
         kwargs = inst.last_create_kwargs
@@ -99,7 +101,7 @@ class TestExtractJson:
         }
         assert content[1] == {"type": "text", "text": _USER}
 
-    def test_empty_choices_raises_retryable_validation_error(self, monkeypatch):
+    def test_empty_choices_raises_page_validation_error(self, monkeypatch):
         class _NoChoicesFakeOpenAI(_FakeOpenAI):
             def _create(self, **kwargs):
                 raw = super()._create(**kwargs)
@@ -112,6 +114,28 @@ class TestExtractJson:
 
         with pytest.raises(ValidationError, match="no choices"):
             extract_json("b64abc", _SYSTEM, _USER, page=3)
+
+    def test_sends_configured_reasoning_effort(self, monkeypatch):
+        s = _patch(monkeypatch)
+        s.reasoning_effort = "high"
+
+        extract_json("b64abc", _SYSTEM, _USER, page=7)
+
+        assert _FakeOpenAI.instances[0].last_create_kwargs["extra_body"] == {
+            "usage": {"include": True},
+            "reasoning": {"effort": "high"},
+        }
+
+    def test_sends_configured_request_timeout_and_disables_sdk_retries(
+        self, monkeypatch
+    ):
+        s = _patch(monkeypatch)
+        s.request_timeout_seconds = 17.5
+
+        extract_json("b64abc", _SYSTEM, _USER, page=7)
+
+        assert _FakeOpenAI.instances[0].kwargs["timeout"] == 17.5
+        assert _FakeOpenAI.instances[0].kwargs["max_retries"] == 0
 
 
 class TestCostTracking:
@@ -143,7 +167,7 @@ class TestCostTracking:
         _patch(monkeypatch)
         extract_json("b64abc", _SYSTEM, _USER, page=1)
         extract_json("b64abc", _SYSTEM, _USER, page=2)
-        extract_json("b64abc", _SYSTEM, _USER, page=2)  # retry on same page
+        extract_json("b64abc", _SYSTEM, _USER, page=2)  # repeated attribution
 
         assert cost_module._totals.calls == 3
         assert cost_module._totals.total_cost == pytest.approx(0.0369)

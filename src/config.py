@@ -50,34 +50,50 @@ class Settings(BaseSettings):
     )
     mode: Literal["debug", "running"] = Field(
         "running",
-        description="Pipeline execution mode: 'debug' persists per-page artifacts from both transform and validate layers; 'running' keeps validated entries in memory and only the load layer writes to disk.",
+        description="Pipeline execution mode: 'debug' also persists raw and annotated per-page artifacts; both modes persist successful pages immediately.",
     )
-    max_attempts: int = Field(
-        3,
-        description="Maximum transform/validate retry attempts per page before the page fails and the pipeline aborts.",
+    request_timeout_seconds: float = Field(
+        120.0,
+        gt=0,
+        description="OpenAI-compatible API request timeout in seconds.",
+    )
+    grounding_threshold: float = Field(
+        0.9,
+        description=(
+            "Min needle-coverage token overlap ratio for fuzzy "
+            "`trailing_text` grounding. Consulted only when strict "
+            "substring fails and trailing_text has ≥ "
+            "`grounding_min_tokens` tokens."
+        ),
+    )
+    grounding_min_tokens: int = Field(
+        5,
+        description=(
+            "Min token count for `trailing_text` to be eligible for the "
+            "fuzzy fallback. Below this, strict substring only. With "
+            "threshold=0.9, 5-9 token text needs 100% coverage."
+        ),
     )
     track_cost: bool = Field(
         True,
         description="Track per-call OpenRouter cost via response headers and emit a running tally plus a final COST SUMMARY line.",
+    )
+    reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] | None = Field(
+        None,
+        description="Optional OpenRouter reasoning effort sent to supported models.",
     )
 
     def pdf_path(self) -> Path:
         return self.data_dir / "columns" / f"VS{self.volume}-1col.pdf"
 
     def ocr_txt_path(self) -> Path:
-        return self.data_dir / "OCR_cols" / f"VS{self.volume}-1col-googlevision.txt"
+        return self.data_dir / "sanitized_ocr" / f"VS{self.volume}-1col-googlevision.txt"
 
     def raw_page_path(self, page: int, model: str) -> Path:
         """Transform-layer raw_json path (debug mode only / first attempt)."""
         return self.raw_output_dir / f"VS{self.volume}_page_{page:03d}_{sanitize_model(model)}.json"
-
-    def raw_retry_page_path(self, page: int, model: str, attempt: int) -> Path:
-        """Transform-layer raw_json path for a retry attempt (attempt >= 2).
-
-        Written to disk regardless of pipeline mode so prompt-failure
-        artifacts are always available for debugging.
-        """
-        return self.raw_output_dir / f"VS{self.volume}_page_{page:03d}_{sanitize_model(model)}_retry{attempt}.json"
 
     def validated_pages_dir(self) -> Path:
         """Per-page validated JSON directory (debug mode only)."""
@@ -87,9 +103,13 @@ class Settings(BaseSettings):
         """Validate-layer per-page path (debug mode only)."""
         return self.validated_pages_dir() / f"VS{self.volume}_page_{page:03d}_{sanitize_model(model)}.json"
 
-    def stitched_path(self, model: str) -> Path:
-        """Load-layer stitched volume path (both modes)."""
+    def dictionary_path(self, model: str) -> Path:
+        """Model-specific, incrementally persisted volume path."""
         return self.output_dir / f"vs_{self.volume}_{sanitize_model(model)}.json"
+
+    def failures_path(self) -> Path:
+        """Sorted failed-page ledger for the active volume."""
+        return self.output_dir / f"vol_{self.volume}" / "failures.txt"
 
 
 @lru_cache

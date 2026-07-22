@@ -1,142 +1,414 @@
+"""Dictionary-entry schemas and deterministic review annotation."""
+
+from __future__ import annotations
+
 import logging
+import re
+import unicodedata
+from enum import Enum
 
-from pydantic import BaseModel, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from src.common.errors import ValidationError
 from src.common.layout import analyze_first_span, convert_image_to_layout_data
-from src.common.normalize import normalize
+from src.common.normalize import (
+    HEADWORD_FUZZY_CUTOFF,
+    best_token_ratio,
+    is_hyphen_prefix_match,
+    is_standalone_token,
+    normalize,
+    strip_trailing_digits,
+    token_overlap_ratio,
+)
 
 logger = logging.getLogger(__name__)
 
-
-def _require_normalized_ocr(info: ValidationInfo) -> str:
-    """Return the pre-normalized OCR text from the validation context.
-
-    Raises `ValidationError` if missing, absent, or whitespace-only.
-    """
-    ctx = info.context or {}
-    normalized_ocr = ctx.get("normalized_ocr")
-    if not isinstance(normalized_ocr, str) or not normalized_ocr.strip():
-        raise ValidationError(
-            "normalized_ocr context required for grounding (missing, empty, "
-            "or whitespace-only)"
-        )
-    return normalized_ocr
+_CROSS_REFERENCE_PROSE_RE = re.compile(
+    r"(?:^|\s)(?:v\.|V\.|Cfr\.|Anche|anche)(?:\s|$)"
+)
+_EDGE_PUNCTUATION = ".,;:!?\"“”‘’"
+_ROMAN_ARABIC_ONE_RE = re.compile(r"(?<!\w)[I1](?!\w)")
+_TRAILING_DIGITS_RE = re.compile(r"\d+$")
 
 
-def _entry_prefix(info: ValidationInfo) -> str:
-    """Build the `entry {i} ` prefix for grounding error messages."""
-    ctx = info.context or {}
-    index = ctx.get("index")
-    return f"entry {index} " if index is not None else ""
+class ReviewStatus(str, Enum):
+    """Disposition assigned by the deterministic entry-quality checks."""
+
+    PASSED = "passed"
+    MACHINE = "machine"
+    HUMAN = "human"
 
 
-class DictionaryEntry(BaseModel):
+class LLMEntry(BaseModel):
+    """The complete and only schema emitted by the language model."""
+
+    model_config = ConfigDict(extra="forbid")
+
     headword: str | None = Field(
-        None,
-        description="The canonical lemma/headword; None when a page begins mid-definition.",
+        ...,
+        description=(
+            "The canonical lemma/headword; null only when a page begins "
+            "mid-definition."
+        ),
     )
     trailing_text: str = Field(
         ...,
-        description="Body text following the headword line: definitions, citations, sub-senses.",
+        description=(
+            "Body text following the headword: definitions, citations, and "
+            "sub-senses."
+        ),
     )
     variants: list[str] | None = Field(
-        None,
-        description="Alternate spellings / dialectal variants explicitly listed in the entry.",
+        ...,
+        description=(
+            "Alternate spellings or dialectal variants explicitly listed in "
+            "the entry."
+        ),
     )
+
+
+class DictionaryEntry(LLMEntry):
+    """A flat persisted entry with pipeline-owned provenance and review data."""
+
     page_numbers: list[int] = Field(
-        description="Printed page number(s) this entry's text was drawn from; multi-element if it spans pages.",
+        ...,
+        description=(
+            "Printed page number(s) from which this entry's text was drawn."
+        ),
     )
     vs_vol: int = Field(
-        description="VS volume number this entry was drawn from; placeholder "
-        "0 emitted by the model, real value injected programmatically downstream.",
+        ...,
+        description="VS volume number from which this entry was drawn.",
+    )
+    is_review_needed: ReviewStatus = Field(
+        ...,
+        description="Deterministic review disposition: passed, machine, or human.",
+    )
+    review_reason: str = Field(
+        ...,
+        description="Newline-delimited quality findings in validator order.",
     )
 
-    @model_validator(mode="after")
-    def validate_layout_alignment(self, info: ValidationInfo) -> "DictionaryEntry":
-        """Verify the headword's null-state against the page's physical layout.
 
-        Only the first entry on a page can be an orphan, so the check is
-        gated on ``context["index"] == 0`` and an ``image_payload`` (raw PNG
-        bytes) in the context; otherwise no-ops so standalone
-        ``model_validate`` calls without image bytes still work.
+def _prefix(index: int | None) -> str:
+    return f"entry {index} " if index is not None else ""
 
-        Heuristic on the first two real text lines (pixel-based; VS PDFs are
-        rasterized scans with no text layer):
 
-        - ``|Δx| > (headword_delta - tolerance)`` -> headword present ->
-          expected ``self.headword is not None``.
-        - ``|Δx| ≤ (headword_delta - tolerance)`` -> lines aligned ->
-          continuation -> expected ``self.headword is None``.
+def _atomic_headword_finding(value: str, index: int | None) -> str | None:
+    """Return the existing atomic-headword error message, if applicable."""
+    if "," in value or ";" in value:
+        reason = "combined alternatives"
+    elif "(" in value or ")" in value:
+        reason = "locality/source parentheses"
+    elif _CROSS_REFERENCE_PROSE_RE.search(value):
+        reason = "cross-reference prose"
+    else:
+        return None
+    return f"{_prefix(index)}headword {value!r} contains {reason}"
 
-        `headword_delta` and `tolerance` come from `Settings` via the
-        validation context. Disagreement raises `ValueError`.
-        """
-        ctx = info.context or {}
-        if "image_payload" not in ctx:
-            return self
-        if ctx.get("index", 0) != 0:
-            return self
 
-        payload = ctx["image_payload"]
-        delta = ctx.get("headword_delta", 36.0)
-        tolerance = ctx.get("tolerance", 15.0)
+def _hyphen_mismatch_token(value: str, normalized_ocr: str) -> str | None:
+    """Find an otherwise exact OCR token with different hyphen placement."""
+    value_token = normalize(value).strip(_EDGE_PUNCTUATION)
+    value_without_hyphens = value_token.replace("-", "")
+    if not value_without_hyphens:
+        return None
 
-        try:
-            layout_data = convert_image_to_layout_data(payload)
-            is_indented = analyze_first_span(layout_data, delta, tolerance)
-            expected_is_orphan = not is_indented
-            if (self.headword is None) != expected_is_orphan:
-                raise ValueError(
-                    f"AI extraction mismatch. Model flagged page start with "
-                    f"headword={'None' if self.headword is None else repr(self.headword)}, "
-                    f"but physical layout heuristics expected "
-                    f"{'headword=None (orphan)' if expected_is_orphan else 'headword present'} "
-                    f"(|Δx| threshold={delta - tolerance} from headword_delta={delta} - "
-                    f"tolerance={tolerance})."
-                )
-        except ValueError:
-            raise
-        except Exception as e:
-            raise ValueError(f"Structural layout parsing failure: {e}")
+    for raw_token in normalized_ocr.split():
+        ocr_token = raw_token.strip(_EDGE_PUNCTUATION)
+        if "-" not in ocr_token:
+            continue
+        if ocr_token.endswith("-") and ocr_token.count("-") == 1:
+            continue
+        if (
+            ocr_token != value_token
+            and ocr_token.replace("-", "") == value_without_hyphens
+        ):
+            return ocr_token
+    return None
 
-        return self
 
-    @model_validator(mode="after")
-    def _validate_headword(self, info: ValidationInfo) -> "DictionaryEntry":
-        """Ground `headword` against the normalized OCR text; skip if None."""
-        normalized_ocr = _require_normalized_ocr(info)
-        if self.headword is None:
-            return self
-        if normalize(self.headword) not in normalized_ocr:
-            raise ValidationError(
-                f"{_entry_prefix(info)}headword {self.headword!r} "
-                "not found in OCR text"
+def _normalized_ocr_tokens(normalized_ocr: str) -> set[str]:
+    return {
+        raw_token.strip(_EDGE_PUNCTUATION)
+        for raw_token in normalized_ocr.split()
+        if raw_token.strip(_EDGE_PUNCTUATION)
+    }
+
+
+def _collapsed_doubled_dotted_d_token(
+    value: str, normalized_ocr: str
+) -> str | None:
+    value_token = normalize(value).strip(_EDGE_PUNCTUATION)
+    for ocr_token in _normalized_ocr_tokens(normalized_ocr):
+        if "ḍḍ" in ocr_token and ocr_token.replace("ḍḍ", "ḍ") == value_token:
+            return ocr_token
+    return None
+
+
+def _omitted_homonym_digit_token(
+    value: str, normalized_ocr: str
+) -> str | None:
+    value_token = normalize(value).strip(_EDGE_PUNCTUATION)
+    if not value_token or _TRAILING_DIGITS_RE.search(value_token):
+        return None
+    ocr_tokens = _normalized_ocr_tokens(normalized_ocr)
+    if value_token in ocr_tokens:
+        return None
+    for ocr_token in ocr_tokens:
+        if (
+            _TRAILING_DIGITS_RE.search(ocr_token)
+            and _TRAILING_DIGITS_RE.sub("", ocr_token) == value_token
+        ):
+            return ocr_token
+    return None
+
+
+def _numeral_skeleton(value: str) -> str:
+    return _ROMAN_ARABIC_ONE_RE.sub("#", value)
+
+
+def _has_roman_arabic_one_substitution(
+    normalized_value: str, normalized_ocr: str
+) -> bool:
+    numeral_positions = [
+        match.start() for match in _ROMAN_ARABIC_ONE_RE.finditer(normalized_value)
+    ]
+    if not numeral_positions:
+        return False
+
+    value_skeleton = _numeral_skeleton(normalized_value)
+    ocr_skeleton = _numeral_skeleton(normalized_ocr)
+    start = ocr_skeleton.find(value_skeleton)
+    while start != -1:
+        if any(
+            normalized_value[position] != normalized_ocr[start + position]
+            for position in numeral_positions
+        ):
+            return True
+        start = ocr_skeleton.find(value_skeleton, start + 1)
+    return False
+
+
+def _has_compatible_ocr_diacritic_loss(
+    normalized_value: str, normalized_ocr: str
+) -> bool:
+    parts: list[str] = []
+    has_diacritic = False
+    for character in normalized_value:
+        decomposed = unicodedata.normalize("NFD", character)
+        if len(decomposed) > 1 and any(
+            unicodedata.combining(mark) for mark in decomposed[1:]
+        ):
+            has_diacritic = True
+            parts.append(
+                f"(?:{re.escape(character)}|{re.escape(decomposed[0])})"
             )
-        return self
+        else:
+            parts.append(re.escape(character))
+    if not has_diacritic:
+        return False
+    return re.search("".join(parts), normalized_ocr) is not None
 
-    @model_validator(mode="after")
-    def _validate_variants(self, info: ValidationInfo) -> "DictionaryEntry":
-        """Ground each element of `variants` against the normalized OCR text."""
-        normalized_ocr = _require_normalized_ocr(info)
-        if not self.variants:
-            return self
-        for v in self.variants:
-            if normalize(v) not in normalized_ocr:
-                raise ValidationError(
-                    f"{_entry_prefix(info)}variant {v!r} not found in OCR text"
-                )
-        return self
 
-    @model_validator(mode="after")
-    def _validate_trailing_text(
-        self, info: ValidationInfo
-    ) -> "DictionaryEntry":
-        """Ground `trailing_text` against the normalized OCR text."""
-        normalized_ocr = _require_normalized_ocr(info)
-        if normalize(self.trailing_text) not in normalized_ocr:
-            raise ValidationError(
-                f"{_entry_prefix(info)}trailing_text {self.trailing_text!r} "
-                "not found in OCR text"
+def _short_field_finding(
+    value: str,
+    field_label: str,
+    normalized_ocr: str,
+    index: int | None,
+) -> str | None:
+    """Return the first finding from the established short-field gate."""
+    normalized_value = normalize(value)
+    ocr_token = _hyphen_mismatch_token(value, normalized_ocr)
+    if ocr_token is not None:
+        return (
+            f"{_prefix(index)}{field_label} {value!r} has omitted or "
+            f"displaced hyphen; OCR contains {ocr_token!r}"
+        )
+
+    doubled_token = _collapsed_doubled_dotted_d_token(value, normalized_ocr)
+    if doubled_token is not None:
+        return (
+            f"{_prefix(index)}{field_label} {value!r} collapses printed "
+            f"'ḍḍ' to 'ḍ'; OCR contains {doubled_token!r}"
+        )
+
+    numbered_token = _omitted_homonym_digit_token(value, normalized_ocr)
+    if numbered_token is not None:
+        return (
+            f"{_prefix(index)}{field_label} {value!r} omits attached "
+            f"homonym numeral; OCR contains {numbered_token!r}"
+        )
+
+    if normalized_value in normalized_ocr:
+        return None
+
+    root = strip_trailing_digits(normalized_value)
+    if root and root != normalized_value and is_standalone_token(root, normalized_ocr):
+        logger.debug(
+            "%s%s root-token-accepted (value=%r root=%r)",
+            _prefix(index),
+            field_label,
+            value,
+            root,
+        )
+        return None
+
+    if is_hyphen_prefix_match(normalized_value, normalized_ocr):
+        logger.debug(
+            "%s%s hyphen-prefix-accepted (value=%r)",
+            _prefix(index),
+            field_label,
+            value,
+        )
+        return None
+
+    ratio = best_token_ratio(normalized_value, normalized_ocr)
+    if ratio >= HEADWORD_FUZZY_CUTOFF:
+        logger.debug(
+            "%s%s fuzzy-token-accepted (value=%r ratio=%.2f)",
+            _prefix(index),
+            field_label,
+            value,
+            ratio,
+        )
+        return None
+
+    return f"{_prefix(index)}{field_label} {value!r} not found in OCR text"
+
+
+def _trailing_text_finding(
+    value: str,
+    normalized_ocr: str,
+    index: int | None,
+    *,
+    grounding_min_tokens: int,
+    grounding_threshold: float,
+) -> str | None:
+    normalized_trailing = normalize(value)
+    if normalized_trailing in normalized_ocr:
+        return None
+
+    if _has_roman_arabic_one_substitution(normalized_trailing, normalized_ocr):
+        return (
+            f"{_prefix(index)}trailing_text contains Roman I/Arabic 1 "
+            "substitution"
+        )
+
+    if _has_compatible_ocr_diacritic_loss(normalized_trailing, normalized_ocr):
+        logger.debug(
+            "%strailing_text compatible OCR-diacritic-loss accepted",
+            _prefix(index),
+        )
+        return None
+
+    token_count = len(normalized_trailing.split())
+    if token_count >= grounding_min_tokens:
+        ratio = token_overlap_ratio(normalized_ocr, normalized_trailing)
+        if ratio >= grounding_threshold:
+            logger.debug(
+                "%strailing_text fuzzy-accepted (tokens=%d ratio=%.4f "
+                "threshold=%.2f)",
+                _prefix(index),
+                token_count,
+                ratio,
+                grounding_threshold,
             )
-        return self
+            return None
+
+    return f"{_prefix(index)}trailing_text {value!r} not found in OCR text"
+
+
+def annotate_entry(
+    entry: LLMEntry,
+    *,
+    index: int,
+    page_number: int,
+    volume: int,
+    normalized_ocr: str,
+    image_payload: bytes,
+    headword_delta: float,
+    layout_tolerance: float,
+    grounding_threshold: float,
+    grounding_min_tokens: int,
+    layout_error: str | None = None,
+) -> DictionaryEntry:
+    """Collect all quality findings and return an unchanged annotated entry.
+
+    Finding order is layout, headword, variants in source order, then
+    trailing text. Text-only findings are machine-reviewable when exactly one
+    is present and human-reviewable when two or more are present. Any
+    orphan/layout mismatch or layout-analysis finding promotes the entry
+    directly to human review.
+    """
+    findings: list[str] = []
+    has_layout_finding = False
+
+    if index == 0:
+        if layout_error is not None:
+            findings.append(layout_error)
+            has_layout_finding = True
+        else:
+            try:
+                layout_data = convert_image_to_layout_data(image_payload)
+                is_indented = analyze_first_span(
+                    layout_data, headword_delta, layout_tolerance
+                )
+                expected_is_orphan = not is_indented
+                if (entry.headword is None) != expected_is_orphan:
+                    findings.append(
+                        "AI extraction mismatch. Model flagged page start with "
+                        f"headword={'None' if entry.headword is None else repr(entry.headword)}, "
+                        "but physical layout heuristics expected "
+                        f"{'headword=None (orphan)' if expected_is_orphan else 'headword present'} "
+                        f"(|Δx| threshold={headword_delta - layout_tolerance} "
+                        f"from headword_delta={headword_delta} - "
+                        f"tolerance={layout_tolerance})."
+                    )
+                    has_layout_finding = True
+            except Exception as exc:
+                findings.append(f"Structural layout parsing failure: {exc}")
+                has_layout_finding = True
+
+    text_findings: list[str] = []
+    if entry.headword is not None:
+        headword_finding = _atomic_headword_finding(entry.headword, index)
+        if headword_finding is None:
+            headword_finding = _short_field_finding(
+                entry.headword, "headword", normalized_ocr, index
+            )
+        if headword_finding is not None:
+            text_findings.append(headword_finding)
+
+    if entry.variants:
+        for variant in entry.variants:
+            finding = _short_field_finding(
+                variant, "variant", normalized_ocr, index
+            )
+            if finding is not None:
+                text_findings.append(finding)
+
+    trailing_finding = _trailing_text_finding(
+        entry.trailing_text,
+        normalized_ocr,
+        index,
+        grounding_min_tokens=grounding_min_tokens,
+        grounding_threshold=grounding_threshold,
+    )
+    if trailing_finding is not None:
+        text_findings.append(trailing_finding)
+
+    findings.extend(text_findings)
+    if has_layout_finding or len(text_findings) >= 2:
+        status = ReviewStatus.HUMAN
+    elif len(text_findings) == 1:
+        status = ReviewStatus.MACHINE
+    else:
+        status = ReviewStatus.PASSED
+
+    return DictionaryEntry(
+        **entry.model_dump(),
+        page_numbers=[page_number],
+        vs_vol=volume,
+        is_review_needed=status,
+        review_reason="\n".join(findings),
+    )

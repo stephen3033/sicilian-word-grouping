@@ -8,10 +8,13 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "openai",
+    "rapidfuzz",
+    "numpy>=2.5.1",
 ]
 
 [project.scripts]
 sicilian-word-grouping = "src.main:main"
+vs-character-ocr = "src.character_ocr.cli:main"
 
 [build-system]
 requires = ["hatchling"]

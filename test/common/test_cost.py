@@ -29,7 +29,7 @@ class TestRecordCall:
     def test_accumulates_across_pages_and_attempts(self):
         record_call(page=1, cost=0.01)
         record_call(page=2, cost=0.02)
-        record_call(page=2, cost=0.03)  # retry on same page
+        record_call(page=2, cost=0.03)  # repeated attribution
 
         assert cost_module._totals.calls == 3
         assert cost_module._totals.total_cost == pytest.approx(0.06)
