@@ -35,14 +35,16 @@ and provider pricing.
 | Gemini Flash 3.5 | $0.02710 | Good cost/performance range. |
 | Claude Fable 5 | $0.28450 | — |
 | Claude Sonnet 5 | $0.06750 | — |
-| Claude Sonnet 4.6 | $0.04755 | Good cost/performance range. |
+| Claude Sonnet 4.6 | $0.07917 | Successful E2E average, including two retries. |
 | GPT 5.5 | $0.19900 | Returned one-line JSON. |
 | GPT 5.4 | $0.03510 | Good cost/performance range; returned one-line JSON. |
 | GPT 5.4 Mini | $0.00900 | Did not reliably follow the schema. |
 | Kimi K2.6 | $0.06200 | First-page extraction hit rate limits. |
 | Kimi K2.7 Code | $0.04965 | Missed variants and altered trailing text. |
 
-The most promising observed range was about **$0.01–$0.05 per page**.
+The Qwen and Sonnet figures are their E2E totals divided by five requested
+pages, including retries. The most promising observed range was about
+**$0.01–$0.05 per page**.
 OpenRouter's actual per-call cost and final total are written to the pipeline
 log. Set `VS_TRACK_COST=false` to disable tracking.
 
